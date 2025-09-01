@@ -1,5 +1,6 @@
 use std::{net::SocketAddr, sync::Arc};
 
+use codecrafters_redis::RESP;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -32,7 +33,27 @@ async fn main() -> anyhow::Result<()> {
 async fn process_connection(mut stream: TcpStream, _addr: SocketAddr) -> anyhow::Result<()> {
     let mut buf = [0u8; 1024];
     loop {
-        let _bytes_read = stream.read(&mut buf).await?;
-        stream.write_all(b"+PONG\r\n").await?;
+        let bytes_read = stream.read(&mut buf).await?;
+        let data = RESP::from_str(str::from_utf8(&buf[..bytes_read])?)?;
+        eprintln!("{data:?}");
+        // data should be an array, commands
+        let RESP::Array(command_args) = data else {
+            return Err(anyhow::anyhow!(
+                "expected an array with command and arguments, got {data:?}"
+            ));
+        };
+        let RESP::String(command) = command_args[0] else {
+            return Err(anyhow::anyhow!("command is not an string"));
+        };
+        let args = &command_args[1..];
+
+        match command {
+            "PING" => stream.write_all(b"+PONG\r\n").await?,
+            "ECHO" => {
+                let key = &args[0];
+                stream.write_all(key.to_string().as_bytes()).await?;
+            }
+            _ => return Err(anyhow::anyhow!("Unknown command {command}")),
+        }
     }
 }
