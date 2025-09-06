@@ -8,10 +8,12 @@ pub enum RESP {
 }
 
 impl RESP {
+    pub const NULL_BULK: &'static str = "$-1\r\n";
+
     pub fn from_str(s: &str) -> anyhow::Result<Self> {
-        eprintln!("Parsing: {s}");
-        Self::recursive_parse(s).map(|(r, cnt)| {
-            eprint!("Read {cnt} bytes, remaining str {}", &s[cnt..]);
+        // eprintln!("Parsing: {s}");
+        Self::recursive_parse(s).map(|(r, _cnt)| {
+            // eprint!("Read {cnt} bytes, remaining str {}", &s[cnt..]);
             r
         })
     }
@@ -61,8 +63,8 @@ impl RESP {
                 let mut vals = Vec::with_capacity(len);
                 let mut offset = 2 + break_idx;
                 for _ in 0..len {
-                    let (v, bytes_read) = Self::recursive_parse(dbg!(&val[offset..]))?;
-                    dbg!(&v, bytes_read);
+                    let (v, bytes_read) = Self::recursive_parse(&val[offset..])?;
+                    // dbg!(&v, bytes_read);
                     vals.push(v);
                     offset += bytes_read;
                 }
@@ -98,9 +100,6 @@ impl RESP {
                 )
             }
         }
-    }
-    pub fn null_bulk() -> Self {
-        Self::Bulk("$-1\r\n".as_bytes().to_vec())
     }
 }
 
