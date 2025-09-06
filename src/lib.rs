@@ -1,20 +1,20 @@
-#[derive(Debug, PartialEq, Eq)]
-pub enum RESP<'a> {
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub enum RESP {
     Int(i64),
-    String(&'a str),
-    Error(&'a str),
-    Array(Vec<RESP<'a>>),
+    String(String),
+    Error(String),
+    Array(Vec<RESP>),
 }
 
-impl<'a> RESP<'a> {
-    pub fn from_str(s: &'a str) -> anyhow::Result<Self> {
+impl RESP {
+    pub fn from_str(s: &str) -> anyhow::Result<Self> {
         eprintln!("Parsing: {s}");
         Self::recursive_parse(s).map(|(r, cnt)| {
             eprint!("Read {cnt} bytes, remaining str {}", &s[cnt..]);
             r
         })
     }
-    fn recursive_parse(s: &'a str) -> anyhow::Result<(Self, usize)> {
+    fn recursive_parse(s: &str) -> anyhow::Result<(Self, usize)> {
         let resp_type = &s[..1];
         let val = &s[1..];
         let resp = match resp_type {
@@ -30,13 +30,16 @@ impl<'a> RESP<'a> {
                 let break_idx = val
                     .find("\r\n")
                     .ok_or(anyhow::anyhow!("No CRLF termination found"))?;
-                (RESP::String(&val[..break_idx]), break_idx + 2 + 1)
+                (
+                    RESP::String(val[..break_idx].to_string()),
+                    break_idx + 2 + 1,
+                )
             }
             "-" => {
                 let break_idx = val
                     .find("\r\n")
                     .ok_or(anyhow::anyhow!("No CRLF termination found"))?;
-                (RESP::Error(&val[..break_idx]), break_idx + 2 + 1)
+                (RESP::Error(val[..break_idx].to_string()), break_idx + 2 + 1)
             }
             // bulk string
             "$" => {
@@ -45,7 +48,10 @@ impl<'a> RESP<'a> {
                     .ok_or(anyhow::anyhow!("No CRLF termination found"))?;
                 let len: usize = val[..break_idx].parse()?;
                 let remaining = &val[(2 + break_idx)..];
-                (RESP::String(&remaining[..len]), len + break_idx + 4 + 1)
+                (
+                    RESP::String(remaining[..len].to_string()),
+                    len + break_idx + 4 + 1,
+                )
             }
             // array
             "*" => {
@@ -123,7 +129,7 @@ mod test_resp {
     fn parse_simple_string() {
         let val = "+OK\r\n";
         let resp = RESP::from_str(&val).expect("Expected to parse valid RESP string");
-        assert_eq!(resp, RESP::String("OK"));
+        assert_eq!(resp, RESP::String("OK".to_string()));
 
         assert_eq!(val, resp.to_string());
     }
@@ -132,13 +138,13 @@ mod test_resp {
     fn parse_bulk_string() {
         let val = "$6\r\nhe\rllo\r\n";
         let resp = RESP::from_str(&val).expect("Expected to parse valid RESP string");
-        assert_eq!(resp, RESP::String("he\rllo"));
+        assert_eq!(resp, RESP::String("he\rllo".to_string()));
         assert_eq!(val, resp.to_string());
 
         // test empty string
         let val = "$0\r\n\r\n";
         let resp = RESP::from_str(&val).expect("Expected to parse valid RESP string");
-        assert_eq!(resp, RESP::String(""));
+        assert_eq!(resp, RESP::String("".to_string()));
 
         // nil string?
     }
@@ -150,9 +156,9 @@ mod test_resp {
         assert_eq!(
             resp,
             RESP::Array(vec![
-                RESP::String("OK"),
-                RESP::String("hello"),
-                RESP::String("world"),
+                RESP::String("OK".to_string()),
+                RESP::String("hello".to_string()),
+                RESP::String("world".to_string()),
             ])
         );
 
@@ -162,7 +168,10 @@ mod test_resp {
             resp,
             RESP::Array(vec![
                 RESP::Array(vec![RESP::Int(1), RESP::Int(2), RESP::Int(3),]),
-                RESP::Array(vec![RESP::String("Hello"), RESP::Error("World"),])
+                RESP::Array(vec![
+                    RESP::String("Hello".to_string()),
+                    RESP::Error("World".to_string()),
+                ])
             ])
         );
         assert_eq!(val, resp.to_string())
