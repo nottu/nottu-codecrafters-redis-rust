@@ -1,8 +1,9 @@
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum RESP {
     Int(i64),
-    String(String),
+    SimpleString(String),
     Error(String),
+    Bulk(Vec<u8>),
     Array(Vec<RESP>),
 }
 
@@ -31,7 +32,7 @@ impl RESP {
                     .find("\r\n")
                     .ok_or(anyhow::anyhow!("No CRLF termination found"))?;
                 (
-                    RESP::String(val[..break_idx].to_string()),
+                    RESP::SimpleString(val[..break_idx].to_string()),
                     break_idx + 2 + 1,
                 )
             }
@@ -48,10 +49,8 @@ impl RESP {
                     .ok_or(anyhow::anyhow!("No CRLF termination found"))?;
                 let len: usize = val[..break_idx].parse()?;
                 let remaining = &val[(2 + break_idx)..];
-                (
-                    RESP::String(remaining[..len].to_string()),
-                    len + break_idx + 4 + 1,
-                )
+                let bulk_bytes = remaining[..len].as_bytes();
+                (RESP::Bulk(bulk_bytes.to_vec()), len + break_idx + 4 + 1)
             }
             // array
             "*" => {
@@ -76,12 +75,8 @@ impl RESP {
     pub fn to_string(&self) -> String {
         match self {
             Self::Int(val) => format!(":{val}\r\n"),
-            Self::String(val) => {
-                if val.contains("\r") || val.contains("\n") {
-                    format!("${}\r\n{val}\r\n", val.len())
-                } else {
-                    format!("+{val}\r\n")
-                }
+            Self::SimpleString(val) => {
+                format!("+{val}\r\n")
             }
             Self::Error(val) => {
                 format!("-{val}\r\n")
@@ -95,7 +90,17 @@ impl RESP {
                     .join("");
                 format!("*{num_items}\r\n{s_val}")
             }
+            Self::Bulk(bytes) => {
+                format!(
+                    "${}\r\n{}\r\n",
+                    bytes.len(),
+                    str::from_utf8(bytes).expect("expected valid bytes")
+                )
+            }
         }
+    }
+    pub fn null_bulk() -> Self {
+        Self::Bulk("$-1\r\n".as_bytes().to_vec())
     }
 }
 
@@ -129,7 +134,7 @@ mod test_resp {
     fn parse_simple_string() {
         let val = "+OK\r\n";
         let resp = RESP::from_str(&val).expect("Expected to parse valid RESP string");
-        assert_eq!(resp, RESP::String("OK".to_string()));
+        assert_eq!(resp, RESP::SimpleString("OK".to_string()));
 
         assert_eq!(val, resp.to_string());
     }
@@ -138,13 +143,13 @@ mod test_resp {
     fn parse_bulk_string() {
         let val = "$6\r\nhe\rllo\r\n";
         let resp = RESP::from_str(&val).expect("Expected to parse valid RESP string");
-        assert_eq!(resp, RESP::String("he\rllo".to_string()));
+        assert_eq!(resp, RESP::Bulk("he\rllo".as_bytes().to_vec()));
         assert_eq!(val, resp.to_string());
 
         // test empty string
         let val = "$0\r\n\r\n";
         let resp = RESP::from_str(&val).expect("Expected to parse valid RESP string");
-        assert_eq!(resp, RESP::String("".to_string()));
+        assert_eq!(resp, RESP::Bulk("".as_bytes().to_vec()));
 
         // nil string?
     }
@@ -156,9 +161,9 @@ mod test_resp {
         assert_eq!(
             resp,
             RESP::Array(vec![
-                RESP::String("OK".to_string()),
-                RESP::String("hello".to_string()),
-                RESP::String("world".to_string()),
+                RESP::SimpleString("OK".to_string()),
+                RESP::Bulk("hello".as_bytes().to_vec()),
+                RESP::Bulk("world".as_bytes().to_vec()),
             ])
         );
 
@@ -169,7 +174,7 @@ mod test_resp {
             RESP::Array(vec![
                 RESP::Array(vec![RESP::Int(1), RESP::Int(2), RESP::Int(3),]),
                 RESP::Array(vec![
-                    RESP::String("Hello".to_string()),
+                    RESP::SimpleString("Hello".to_string()),
                     RESP::Error("World".to_string()),
                 ])
             ])
