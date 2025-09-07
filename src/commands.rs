@@ -21,6 +21,11 @@ pub enum Command {
         list_key: String,
         values: Vec<String>,
     },
+    #[command(alias = "LPUSH")]
+    Lpush {
+        list_key: String,
+        values: Vec<String>,
+    },
     #[command(alias = "LRANGE")]
     Lrange {
         list_key: String,

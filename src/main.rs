@@ -139,6 +139,22 @@ async fn process_connection(
                     .write_all(RESP::Int(num_elems as i64).to_string().as_bytes())
                     .await?;
             }
+            commands::Command::Lpush { list_key, values } => {
+                let num_elems = {
+                    let mut locked_cache = cache.lock().await;
+                    let entry = locked_cache.entry(list_key).or_insert(CacheEntry {
+                        value: RESP::empty_array(),
+                        expire_at: None,
+                    });
+                    for value in values {
+                        let _ = entry.value.prepend(value)?;
+                    }
+                    entry.value.len()?
+                };
+                stream
+                    .write_all(RESP::Int(num_elems as i64).to_string().as_bytes())
+                    .await?;
+            }
             commands::Command::Lrange {
                 list_key,
                 start,

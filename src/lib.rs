@@ -1,4 +1,4 @@
-use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+use std::{collections::VecDeque, ffi::OsString, os::unix::ffi::OsStringExt};
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum RESP {
@@ -6,7 +6,7 @@ pub enum RESP {
     SimpleString(String),
     Error(String),
     Bulk(Vec<u8>),
-    Array(Vec<RESP>),
+    Array(VecDeque<RESP>),
 }
 
 impl RESP {
@@ -63,12 +63,12 @@ impl RESP {
                     .find("\r\n")
                     .ok_or(anyhow::anyhow!("No CRLF termination found"))?;
                 let len: usize = val[..break_idx].parse()?;
-                let mut vals = Vec::with_capacity(len);
+                let mut vals = VecDeque::with_capacity(len);
                 let mut offset = 2 + break_idx;
                 for _ in 0..len {
                     let (v, bytes_read) = Self::recursive_parse(&val[offset..])?;
                     // dbg!(&v, bytes_read);
-                    vals.push(v);
+                    vals.push_back(v);
                     offset += bytes_read;
                 }
                 (RESP::Array(vals), offset + 1)
@@ -106,12 +106,21 @@ impl RESP {
     }
 
     pub fn empty_array() -> Self {
-        Self::Array(vec![])
+        Self::Array(VecDeque::new())
     }
 
     pub fn push(&mut self, val: String) -> anyhow::Result<usize> {
         if let Self::Array(arr) = self {
-            arr.push(RESP::Bulk(val.into_bytes()));
+            arr.push_back(RESP::Bulk(val.into_bytes()));
+            Ok(arr.len())
+        } else {
+            Err(anyhow::anyhow!("self is not an array type"))
+        }
+    }
+
+    pub fn prepend(&mut self, val: String) -> anyhow::Result<usize> {
+        if let Self::Array(arr) = self {
+            arr.push_front(RESP::Bulk(val.into_bytes()));
             Ok(arr.len())
         } else {
             Err(anyhow::anyhow!("self is not an array type"))
@@ -143,9 +152,13 @@ impl RESP {
             arr.len()
         );
         let sub_arr = if (start > arr.len()) || (end < start) {
-            vec![]
+            VecDeque::new()
         } else {
-            arr[start..=((arr.len() - 1).min(end))].to_vec()
+            arr.iter()
+                .take(end + 1)
+                .skip(start)
+                .map(|r| r.to_owned())
+                .collect()
         };
         Ok(Self::Array(sub_arr))
     }
@@ -218,24 +231,33 @@ mod test_resp {
         let resp = RESP::try_parse(&val).expect("Expected to parse valid RESP string");
         assert_eq!(
             resp,
-            RESP::Array(vec![
-                RESP::SimpleString("OK".to_string()),
-                RESP::Bulk("hello".as_bytes().to_vec()),
-                RESP::Bulk("world".as_bytes().to_vec()),
-            ])
+            RESP::Array(
+                vec![
+                    RESP::SimpleString("OK".to_string()),
+                    RESP::Bulk("hello".as_bytes().to_vec()),
+                    RESP::Bulk("world".as_bytes().to_vec()),
+                ]
+                .into()
+            )
         );
 
         let val = "*2\r\n*3\r\n:1\r\n:2\r\n:3\r\n*2\r\n+Hello\r\n-World\r\n";
         let resp = RESP::try_parse(&val).expect("Expected to parse valid RESP string");
         assert_eq!(
             resp,
-            RESP::Array(vec![
-                RESP::Array(vec![RESP::Int(1), RESP::Int(2), RESP::Int(3),]),
-                RESP::Array(vec![
-                    RESP::SimpleString("Hello".to_string()),
-                    RESP::Error("World".to_string()),
-                ])
-            ])
+            RESP::Array(
+                vec![
+                    RESP::Array(vec![RESP::Int(1), RESP::Int(2), RESP::Int(3),].into()),
+                    RESP::Array(
+                        vec![
+                            RESP::SimpleString("Hello".to_string()),
+                            RESP::Error("World".to_string()),
+                        ]
+                        .into()
+                    )
+                ]
+                .into()
+            )
         );
         assert_eq!(val, resp.to_string())
     }
