@@ -17,7 +17,10 @@ pub enum Command {
     #[command(alias = "GET")]
     Get { key: String },
     #[command(alias = "RPUSH")]
-    Rpush { list_key: String, value: String },
+    Rpush {
+        list_key: String,
+        values: Vec<String>,
+    },
 }
 
 #[derive(Args, Debug)]

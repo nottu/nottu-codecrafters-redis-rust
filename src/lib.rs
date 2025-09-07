@@ -117,6 +117,13 @@ impl RESP {
             Err(anyhow::anyhow!("self is not an array type"))
         }
     }
+    pub fn len(&self) -> anyhow::Result<usize> {
+        if let Self::Array(arr) = self {
+            Ok(arr.len())
+        } else {
+            Err(anyhow::anyhow!("self is not an array type"))
+        }
+    }
 }
 
 impl From<RESP> for OsString {
