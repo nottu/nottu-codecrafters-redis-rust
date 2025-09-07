@@ -24,8 +24,10 @@ pub enum Command {
     #[command(alias = "LRANGE")]
     Lrange {
         list_key: String,
-        start: usize,
-        end: usize,
+        #[arg(allow_hyphen_values = true)]
+        start: i64,
+        #[arg(allow_hyphen_values = true)]
+        end: i64,
     },
 }
 
