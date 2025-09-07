@@ -1,3 +1,5 @@
+use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum RESP {
     Int(i64),
@@ -10,14 +12,15 @@ pub enum RESP {
 impl RESP {
     pub const NULL_BULK: &'static str = "$-1\r\n";
 
-    pub fn from_str(s: &str) -> anyhow::Result<Self> {
-        // eprintln!("Parsing: {s}");
+    pub fn try_parse(s: &str) -> anyhow::Result<Self> {
+        eprintln!("Parsing: {s:?}");
         Self::recursive_parse(s).map(|(r, _cnt)| {
             // eprint!("Read {cnt} bytes, remaining str {}", &s[cnt..]);
             r
         })
     }
     fn recursive_parse(s: &str) -> anyhow::Result<(Self, usize)> {
+        dbg!(s);
         let resp_type = &s[..1];
         let val = &s[1..];
         let resp = match resp_type {
@@ -103,6 +106,24 @@ impl RESP {
     }
 }
 
+impl From<RESP> for OsString {
+    fn from(value: RESP) -> Self {
+        match value {
+            RESP::SimpleString(v) => v.into(),
+            // TODO: This is *nix specific code, maybe generalize to allow for Windows
+            RESP::Bulk(bytes) => OsString::from_vec(bytes),
+            _ => value.to_string().into(),
+        }
+    }
+}
+
+impl From<String> for RESP {
+    fn from(value: String) -> Self {
+        // TODO, will only work with bulk string
+        Self::Bulk(value.as_bytes().to_vec())
+    }
+}
+
 #[cfg(test)]
 mod test_resp {
     use crate::RESP;
@@ -110,15 +131,15 @@ mod test_resp {
     #[test]
     fn parse_int() {
         let val = ":1000\r\n";
-        let resp = RESP::from_str(&val).expect("Expected to parse valid RESP string");
+        let resp = RESP::try_parse(&val).expect("Expected to parse valid RESP string");
         assert_eq!(resp, RESP::Int(1000));
 
         let val = ":+1000\r\n";
-        let resp = RESP::from_str(&val).expect("Expected to parse valid RESP string");
+        let resp = RESP::try_parse(&val).expect("Expected to parse valid RESP string");
         assert_eq!(resp, RESP::Int(1000));
 
         let val = ":-1000\r\n";
-        let resp = RESP::from_str(&val).expect("Expected to parse valid RESP string");
+        let resp = RESP::try_parse(&val).expect("Expected to parse valid RESP string");
         assert_eq!(resp, RESP::Int(-1000));
 
         // Test to string
@@ -132,7 +153,7 @@ mod test_resp {
     #[test]
     fn parse_simple_string() {
         let val = "+OK\r\n";
-        let resp = RESP::from_str(&val).expect("Expected to parse valid RESP string");
+        let resp = RESP::try_parse(&val).expect("Expected to parse valid RESP string");
         assert_eq!(resp, RESP::SimpleString("OK".to_string()));
 
         assert_eq!(val, resp.to_string());
@@ -141,13 +162,13 @@ mod test_resp {
     #[test]
     fn parse_bulk_string() {
         let val = "$6\r\nhe\rllo\r\n";
-        let resp = RESP::from_str(&val).expect("Expected to parse valid RESP string");
+        let resp = RESP::try_parse(&val).expect("Expected to parse valid RESP string");
         assert_eq!(resp, RESP::Bulk("he\rllo".as_bytes().to_vec()));
         assert_eq!(val, resp.to_string());
 
         // test empty string
         let val = "$0\r\n\r\n";
-        let resp = RESP::from_str(&val).expect("Expected to parse valid RESP string");
+        let resp = RESP::try_parse(&val).expect("Expected to parse valid RESP string");
         assert_eq!(resp, RESP::Bulk("".as_bytes().to_vec()));
 
         // nil string?
@@ -156,7 +177,7 @@ mod test_resp {
     #[test]
     fn parse_array() {
         let val = "*3\r\n+OK\r\n$5\r\nhello\r\n$5\r\nworld\r\n";
-        let resp = RESP::from_str(&val).expect("Expected to parse valid RESP string");
+        let resp = RESP::try_parse(&val).expect("Expected to parse valid RESP string");
         assert_eq!(
             resp,
             RESP::Array(vec![
@@ -167,7 +188,7 @@ mod test_resp {
         );
 
         let val = "*2\r\n*3\r\n:1\r\n:2\r\n:3\r\n*2\r\n+Hello\r\n-World\r\n";
-        let resp = RESP::from_str(&val).expect("Expected to parse valid RESP string");
+        let resp = RESP::try_parse(&val).expect("Expected to parse valid RESP string");
         assert_eq!(
             resp,
             RESP::Array(vec![

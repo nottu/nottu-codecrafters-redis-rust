@@ -1,5 +1,6 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
+use clap::Parser;
 use codecrafters_redis::RESP;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -7,6 +8,10 @@ use tokio::{
     sync::Mutex,
     time::Instant,
 };
+
+use crate::commands::RedisCli;
+
+mod commands;
 
 #[derive(Debug)]
 struct CacheEntry {
@@ -46,101 +51,76 @@ async fn process_connection(
     let mut buf = [0u8; 1024];
     loop {
         let bytes_read = stream.read(&mut buf).await?;
-        let data = RESP::from_str(str::from_utf8(&buf[..bytes_read])?)?;
-        eprintln!("{data:?}");
-        // data should be an array, commands
+        if bytes_read == 0 {
+            eprintln!("No data read, closing stream.");
+            return Ok(());
+        }
+        let data = str::from_utf8(&buf[..bytes_read])?;
+        dbg!(data);
+        let data = RESP::try_parse(data)?;
+        eprintln!("Parsed: {data:?}");
+        // data should be an array of strings (possibly all bulk)
         let RESP::Array(command_args) = data else {
             return Err(anyhow::anyhow!(
                 "expected an array with command and arguments, got {data:?}"
             ));
         };
-        let command = match &command_args[0] {
-            RESP::SimpleString(command) => command,
-            RESP::Bulk(command) => &String::from_utf8(command.clone())?,
-            _ => {
-                return Err(anyhow::anyhow!("Command is not a string"));
+        let command = RedisCli::try_parse_from(
+            // clap wants the first arg to be the program name... we pre-pend a value to comply
+            std::iter::once(RESP::SimpleString("redis-cli".to_string())).chain(command_args),
+        )?;
+        match command.command {
+            commands::Command::Ping => {
+                stream.write_all(b"+PONG\r\n").await?;
             }
-        };
-        let args = &command_args[1..];
-
-        match command.as_str() {
-            "PING" => stream.write_all(b"+PONG\r\n").await?,
-            "ECHO" => {
-                let key = &args[0];
-                stream.write_all(key.to_string().as_bytes()).await?;
+            commands::Command::Echo { value } => {
+                stream
+                    .write_all(RESP::Bulk(value.as_bytes().to_vec()).to_string().as_bytes())
+                    .await?;
             }
-            "SET" => {
-                // some maybe incorrect assumptions
-                // there's at least two more values
-                // 1: A String
-                // 2: Some RESP
-                let key = match &args[0] {
-                    RESP::SimpleString(key) => key,
-                    RESP::Bulk(key) => &String::from_utf8(key.clone())?,
-                    _ => {
-                        return Err(anyhow::anyhow!("Key is not a string"));
-                    }
-                };
+            commands::Command::Set(set_args) => {
+                let expire_at = set_args.expiry_mode.map(|ex_mod| {
+                    Instant::now()
+                        + match ex_mod {
+                            commands::Expiry::Ex { seconds } => Duration::from_secs(seconds),
+                            commands::Expiry::Px { millis } => Duration::from_millis(millis),
+                        }
+                });
                 let mut locked_cache = cache.lock().await;
-                let value = args[1].clone();
-                // TODO: properly parse all SET args...
-                // https://redis.io/docs/latest/commands/set/
-                // For now assume, args[2] is PX
-                let expire_at = args
-                    .get(3)
-                    .map(|ttl| {
-                        let ttl = match ttl {
-                            RESP::Int(v) => *v as u64,
-                            RESP::SimpleString(s) => s.parse()?,
-                            RESP::Bulk(s) => String::from_utf8(s.clone())?.parse()?,
-                            _ => {
-                                return Err(anyhow::anyhow!(
-                                    "ttl cannot be interpreted as an itn, val {ttl:?}"
-                                ))
-                            }
-                        };
-                        eprintln!("TTL: {ttl}");
-                        Ok(Instant::now() + Duration::from_millis(ttl))
-                    })
-                    .transpose()?; // <- flip from Option<Result<_>> to Result<Option<_>>
-                let entry = CacheEntry { value, expire_at };
+                let entry = CacheEntry {
+                    // The set command only stores bulk strings
+                    value: RESP::Bulk(set_args.value.as_bytes().to_vec()),
+                    expire_at,
+                };
                 eprintln!("Storing entry {entry:?}, instant_now: {:?}", Instant::now());
-                locked_cache.insert(key.clone(), entry);
+                locked_cache.insert(set_args.key, entry);
                 stream.write_all(b"+OK\r\n").await?;
             }
-            "GET" => {
-                // some maybe incorrect assumptions
-                // there's one more values
-                // 1: A String
-                let key = match &args[0] {
-                    RESP::SimpleString(key) => key,
-                    RESP::Bulk(key) => &String::from_utf8(key.clone())?,
-                    _ => {
-                        return Err(anyhow::anyhow!("Key is not a string"));
-                    }
-                };
+            commands::Command::Get { key } => {
                 let mut locked_cache = cache.lock().await;
-                let val = locked_cache.get(key);
-                let to_write = match val {
-                    Some(v) => match v.expire_at {
-                        None => v.value.to_string(),
-                        Some(instant) => {
-                            eprintln!("Checking if expired");
-                            if Instant::now() >= instant {
-                                eprintln!("Key is expired");
-                                locked_cache.remove(key);
-                                RESP::NULL_BULK.to_string()
-                            } else {
-                                v.value.to_string()
+                let cached_value = {
+                    if let Some(cached_val) = locked_cache.get(&key) {
+                        match cached_val.expire_at {
+                            None => Some(&cached_val.value),
+                            Some(expiry) => {
+                                if Instant::now() >= expiry {
+                                    eprintln!("Key is expired");
+                                    locked_cache.remove(&key);
+                                    None
+                                } else {
+                                    Some(&cached_val.value)
+                                }
                             }
                         }
-                    },
-                    None => RESP::NULL_BULK.to_string(),
+                    } else {
+                        None
+                    }
                 };
-                eprintln!("sending message: {to_write}");
-                stream.write_all(to_write.as_bytes()).await?;
+                match cached_value {
+                    None => stream.write_all(RESP::NULL_BULK.as_bytes()).await,
+                    Some(v) => stream.write_all(v.to_string().as_bytes()).await,
+                }?;
             }
-            _ => return Err(anyhow::anyhow!("Unknown command {command}")),
         }
     }
 }
