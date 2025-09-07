@@ -168,6 +168,17 @@ async fn process_connection(
                     .unwrap_or(RESP::empty_array());
                 stream.write_all(res.to_string().as_bytes()).await?;
             }
+            commands::Command::Llen { list_key } => {
+                let locked_cache = cache.lock().await;
+                let num_elems = locked_cache
+                    .get(&list_key)
+                    .map(|entry| entry.value.len())
+                    .transpose()?
+                    .unwrap_or(0);
+                stream
+                    .write_all(RESP::Int(num_elems as i64).to_string().as_bytes())
+                    .await?;
+            }
         }
     }
 }

@@ -34,6 +34,8 @@ pub enum Command {
         #[arg(allow_hyphen_values = true)]
         end: i64,
     },
+    #[command(alias = "LLEN")]
+    Llen { list_key: String },
 }
 
 #[derive(Args, Debug)]
