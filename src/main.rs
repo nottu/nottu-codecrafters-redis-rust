@@ -75,7 +75,7 @@ async fn process_connection(
             }
             commands::Command::Echo { value } => {
                 stream
-                    .write_all(RESP::Bulk(value.as_bytes().to_vec()).to_string().as_bytes())
+                    .write_all(RESP::Bulk(value.into_bytes()).to_string().as_bytes())
                     .await?;
             }
             commands::Command::Set(set_args) => {
@@ -86,14 +86,16 @@ async fn process_connection(
                             commands::Expiry::Px { millis } => Duration::from_millis(millis),
                         }
                 });
-                let mut locked_cache = cache.lock().await;
-                let entry = CacheEntry {
-                    // The set command only stores bulk strings
-                    value: RESP::Bulk(set_args.value.as_bytes().to_vec()),
-                    expire_at,
-                };
-                eprintln!("Storing entry {entry:?}, instant_now: {:?}", Instant::now());
-                locked_cache.insert(set_args.key, entry);
+                {
+                    let mut locked_cache = cache.lock().await;
+                    let entry = CacheEntry {
+                        // The set command only stores bulk strings
+                        value: RESP::Bulk(set_args.value.into_bytes()),
+                        expire_at,
+                    };
+                    eprintln!("Storing entry {entry:?}, instant_now: {:?}", Instant::now());
+                    locked_cache.insert(set_args.key, entry);
+                }
                 stream.write_all(b"+OK\r\n").await?;
             }
             commands::Command::Get { key } => {
@@ -120,6 +122,19 @@ async fn process_connection(
                     None => stream.write_all(RESP::NULL_BULK.as_bytes()).await,
                     Some(v) => stream.write_all(v.to_string().as_bytes()).await,
                 }?;
+            }
+            commands::Command::Rpush { list_key, value } => {
+                let num_elems = {
+                    let mut locked_cache = cache.lock().await;
+                    let entry = locked_cache.entry(list_key).or_insert(CacheEntry {
+                        value: RESP::empty_array(),
+                        expire_at: None,
+                    });
+                    entry.value.push(value)
+                }?;
+                stream
+                    .write_all(RESP::Int(num_elems as i64).to_string().as_bytes())
+                    .await?;
             }
         }
     }

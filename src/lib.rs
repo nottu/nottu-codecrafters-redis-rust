@@ -104,6 +104,19 @@ impl RESP {
             }
         }
     }
+
+    pub fn empty_array() -> Self {
+        Self::Array(vec![])
+    }
+
+    pub fn push(&mut self, val: String) -> anyhow::Result<usize> {
+        if let Self::Array(arr) = self {
+            arr.push(RESP::Bulk(val.into_bytes()));
+            Ok(arr.len())
+        } else {
+            Err(anyhow::anyhow!("self is not an array type"))
+        }
+    }
 }
 
 impl From<RESP> for OsString {
@@ -114,13 +127,6 @@ impl From<RESP> for OsString {
             RESP::Bulk(bytes) => OsString::from_vec(bytes),
             _ => value.to_string().into(),
         }
-    }
-}
-
-impl From<String> for RESP {
-    fn from(value: String) -> Self {
-        // TODO, will only work with bulk string
-        Self::Bulk(value.as_bytes().to_vec())
     }
 }
 

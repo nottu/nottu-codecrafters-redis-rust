@@ -16,6 +16,8 @@ pub enum Command {
     Set(SetArgs),
     #[command(alias = "GET")]
     Get { key: String },
+    #[command(alias = "RPUSH")]
+    Rpush { list_key: String, value: String },
 }
 
 #[derive(Args, Debug)]
