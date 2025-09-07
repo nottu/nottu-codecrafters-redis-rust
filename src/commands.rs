@@ -21,6 +21,12 @@ pub enum Command {
         list_key: String,
         values: Vec<String>,
     },
+    #[command(alias = "LRANGE")]
+    Lrange {
+        list_key: String,
+        start: usize,
+        end: usize,
+    },
 }
 
 #[derive(Args, Debug)]

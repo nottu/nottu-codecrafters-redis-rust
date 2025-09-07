@@ -124,6 +124,17 @@ impl RESP {
             Err(anyhow::anyhow!("self is not an array type"))
         }
     }
+    pub fn range(&self, start: usize, end: usize) -> anyhow::Result<Self> {
+        let Self::Array(arr) = self else {
+            return Err(anyhow::anyhow!("self is not an array type"));
+        };
+        let sub_arr = if (start > arr.len()) || (end < start) {
+            vec![]
+        } else {
+            arr[start..=((arr.len() - 1).min(end))].to_vec()
+        };
+        Ok(Self::Array(sub_arr))
+    }
 }
 
 impl From<RESP> for OsString {

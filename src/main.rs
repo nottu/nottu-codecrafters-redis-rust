@@ -139,6 +139,19 @@ async fn process_connection(
                     .write_all(RESP::Int(num_elems as i64).to_string().as_bytes())
                     .await?;
             }
+            commands::Command::Lrange {
+                list_key,
+                start,
+                end,
+            } => {
+                let locked_cache = cache.lock().await;
+                let res = locked_cache
+                    .get(&list_key)
+                    .map(|entry| entry.value.range(start, end))
+                    .transpose()?
+                    .unwrap_or(RESP::empty_array());
+                stream.write_all(res.to_string().as_bytes()).await?;
+            }
         }
     }
 }
