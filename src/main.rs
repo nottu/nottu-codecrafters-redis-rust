@@ -128,13 +128,24 @@ async fn process_connection(mut stream: TcpStream, cache: Db) -> anyhow::Result<
                     .write_all(RESP::Int(num_elems as i64).to_string().as_bytes())
                     .await?;
             }
-            commands::Command::Lpop { list_key } => {
-                let poped = cache.l_pop(list_key).await?;
+            commands::Command::Lpop {
+                list_key,
+                num_elems,
+            } => {
+                let poped = cache.l_pop(list_key, num_elems.unwrap_or(1)).await?;
                 match poped {
                     Some(poped) => {
-                        stream
-                            .write_all(RESP::Bulk(poped).to_string().as_bytes())
-                            .await?
+                        if poped.len() == 1 {
+                            // guaranteed to have one value, this way we don't clone
+                            let val = poped.into_iter().next().unwrap();
+                            stream
+                                .write_all(RESP::Bulk(val).to_string().as_bytes())
+                                .await?
+                        } else {
+                            let val =
+                                RESP::Array(poped.into_iter().map(|e| RESP::Bulk(e)).collect());
+                            stream.write_all(val.to_string().as_bytes()).await?;
+                        }
                     }
                     None => {
                         stream

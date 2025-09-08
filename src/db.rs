@@ -72,9 +72,16 @@ impl Entry {
             Err(anyhow::anyhow!("Entry is not a List type"))
         }
     }
-    fn l_pop(&mut self) -> anyhow::Result<Option<EntryData>> {
+    fn l_pop(&mut self, num_elems: usize) -> anyhow::Result<Option<Vec<EntryData>>> {
         if let Entry::List(list) = self {
-            Ok(list.pop_front())
+            let mut data = Vec::with_capacity(num_elems);
+            for _ in 0..num_elems {
+                let Some(elem) = list.pop_front() else {
+                    break;
+                };
+                data.push(elem);
+            }
+            Ok(if data.is_empty() { None } else { Some(data) })
         } else {
             Err(anyhow::anyhow!("Entry is not a List type"))
         }
@@ -169,11 +176,17 @@ impl Db {
             .map(|entry| entry.value.len().ok())
             .flatten()
     }
-    pub async fn l_pop(&self, key: String) -> anyhow::Result<Option<EntryData>> {
+    pub async fn l_pop(
+        &self,
+        key: String,
+        num_elems: usize,
+    ) -> anyhow::Result<Option<Vec<EntryData>>> {
         let mut locked_cache = self.data.lock().await;
         let entry = locked_cache.entry(key);
         match entry {
-            std::collections::hash_map::Entry::Occupied(mut entry) => entry.get_mut().value.l_pop(),
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                entry.get_mut().value.l_pop(num_elems)
+            }
             std::collections::hash_map::Entry::Vacant(_) => Ok(None),
         }
     }
@@ -233,11 +246,19 @@ mod db_tests {
             .await;
         assert_eq!(Some(3), db.l_len("orange".to_string()).await);
 
-        let result = db.l_pop("orange".to_string()).await.expect("valid list");
+        let result = db.l_pop("orange".to_string(), 1).await.expect("valid list");
         let Some(result) = result else {
             assert!(false, "list is not valid");
             return;
         };
-        assert_eq!(result, b"apple".to_vec());
+        assert_eq!(result[0], b"apple".to_vec());
+
+        // test multi pop
+        let result = db.l_pop("orange".to_string(), 2).await.expect("valid list");
+        let Some(result) = result else {
+            assert!(false, "list is not valid");
+            return;
+        };
+        assert_eq!(result, vec![b"pear".to_vec(), b"blueberry".to_vec()]);
     }
 }
