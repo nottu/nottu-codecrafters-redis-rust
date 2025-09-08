@@ -123,7 +123,7 @@ impl From<RESP> for OsString {
 
 #[cfg(test)]
 mod test_resp {
-    use crate::RESP;
+    use crate::resp::RESP;
 
     #[test]
     fn parse_int() {

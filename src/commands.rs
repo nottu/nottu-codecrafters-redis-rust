@@ -11,11 +11,15 @@ pub enum Command {
     #[command(alias = "PING")]
     Ping,
     #[command(alias = "ECHO")]
-    Echo { value: String },
+    Echo {
+        value: String,
+    },
     #[command(alias = "SET")]
     Set(SetArgs),
     #[command(alias = "GET")]
-    Get { key: String },
+    Get {
+        key: String,
+    },
     #[command(alias = "RPUSH")]
     Rpush {
         list_key: String,
@@ -35,12 +39,15 @@ pub enum Command {
         end: i64,
     },
     #[command(alias = "LLEN")]
-    Llen { list_key: String },
+    Llen {
+        list_key: String,
+    },
     #[command(alias = "LPOP")]
     Lpop {
         list_key: String,
         num_elems: Option<usize>,
     },
+    Close,
 }
 
 #[derive(Args, Debug)]
@@ -62,9 +69,11 @@ pub enum Expiry {
 #[cfg(test)]
 mod command_test {
     use clap::Parser;
-    use codecrafters_redis::RESP;
 
-    use crate::commands::{Command, Expiry, RedisCli};
+    use crate::{
+        commands::{Command, Expiry, RedisCli},
+        resp::RESP,
+    };
 
     #[test]
     fn test_simple_set_command() {
