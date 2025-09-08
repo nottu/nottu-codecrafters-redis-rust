@@ -108,60 +108,6 @@ impl RESP {
     pub fn empty_array() -> Self {
         Self::Array(VecDeque::new())
     }
-
-    pub fn push(&mut self, val: String) -> anyhow::Result<usize> {
-        if let Self::Array(arr) = self {
-            arr.push_back(RESP::Bulk(val.into_bytes()));
-            Ok(arr.len())
-        } else {
-            Err(anyhow::anyhow!("self is not an array type"))
-        }
-    }
-
-    pub fn prepend(&mut self, val: String) -> anyhow::Result<usize> {
-        if let Self::Array(arr) = self {
-            arr.push_front(RESP::Bulk(val.into_bytes()));
-            Ok(arr.len())
-        } else {
-            Err(anyhow::anyhow!("self is not an array type"))
-        }
-    }
-    pub fn len(&self) -> anyhow::Result<usize> {
-        if let Self::Array(arr) = self {
-            Ok(arr.len())
-        } else {
-            Err(anyhow::anyhow!("self is not an array type"))
-        }
-    }
-    pub fn range(&self, start: i64, end: i64) -> anyhow::Result<Self> {
-        let Self::Array(arr) = self else {
-            return Err(anyhow::anyhow!("self is not an array type"));
-        };
-        let start = if start >= 0 {
-            start as usize
-        } else {
-            arr.len().saturating_sub((start.abs()) as usize)
-        };
-        let end = if end >= 0 {
-            end as usize
-        } else {
-            arr.len().saturating_sub((end.abs()) as usize)
-        };
-        eprintln!(
-            "arr_len: {}, getting vals in range [{start},{end}]",
-            arr.len()
-        );
-        let sub_arr = if (start > arr.len()) || (end < start) {
-            VecDeque::new()
-        } else {
-            arr.iter()
-                .take(end + 1)
-                .skip(start)
-                .map(|r| r.to_owned())
-                .collect()
-        };
-        Ok(Self::Array(sub_arr))
-    }
 }
 
 impl From<RESP> for OsString {

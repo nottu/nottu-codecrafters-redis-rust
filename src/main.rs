@@ -84,7 +84,7 @@ async fn process_connection(mut stream: TcpStream, cache: Db) -> anyhow::Result<
                 let cached_value = cache.get(key).await;
                 match cached_value {
                     None => stream.write_all(RESP::NULL_BULK.as_bytes()).await,
-                    Some(v) => stream.write_all(v.to_string().as_bytes()).await,
+                    Some(v) => stream.write_all(RESP::Bulk(v).to_string().as_bytes()).await,
                 }?;
             }
             commands::Command::Rpush { list_key, values } => {
@@ -104,9 +104,17 @@ async fn process_connection(mut stream: TcpStream, cache: Db) -> anyhow::Result<
                 start,
                 end,
             } => {
-                let res = cache.l_range(list_key, start, end).await;
+                let res = cache.l_range(list_key, start, end).await?;
                 match res {
-                    Some(res) => stream.write_all(res.to_string().as_bytes()).await?,
+                    Some(res) => {
+                        stream
+                            .write_all(
+                                RESP::Array(res.into_iter().map(|e| RESP::Bulk(e)).collect())
+                                    .to_string()
+                                    .as_bytes(),
+                            )
+                            .await?
+                    }
                     None => {
                         stream
                             .write_all(RESP::empty_array().to_string().as_bytes())
@@ -119,6 +127,21 @@ async fn process_connection(mut stream: TcpStream, cache: Db) -> anyhow::Result<
                 stream
                     .write_all(RESP::Int(num_elems as i64).to_string().as_bytes())
                     .await?;
+            }
+            commands::Command::Lpop { list_key } => {
+                let poped = cache.l_pop(list_key).await?;
+                match poped {
+                    Some(poped) => {
+                        stream
+                            .write_all(RESP::Bulk(poped).to_string().as_bytes())
+                            .await?
+                    }
+                    None => {
+                        stream
+                            .write_all(RESP::empty_array().to_string().as_bytes())
+                            .await?
+                    }
+                }
             }
         }
     }

@@ -36,6 +36,8 @@ pub enum Command {
     },
     #[command(alias = "LLEN")]
     Llen { list_key: String },
+    #[command(alias = "LPOP")]
+    Lpop { list_key: String },
 }
 
 #[derive(Args, Debug)]
