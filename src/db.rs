@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
     sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use tokio::{
@@ -18,7 +19,7 @@ enum Entry {
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 struct StreamId {
-    millisecond_time: usize,
+    millisecond_time: u128,
     sequence_number: usize,
 }
 
@@ -356,9 +357,6 @@ impl Db {
         entry_id: &str,
         prev_entry_id: Option<&StreamId>,
     ) -> anyhow::Result<StreamId> {
-        if entry_id == "*" {
-            unimplemented!("Auto-generation of entry ID is not implemented");
-        }
         if entry_id == "0-0" {
             anyhow::bail!("ERR The ID specified in XADD must be greater than 0-0");
         }
@@ -368,14 +366,15 @@ impl Db {
         let millis_part = id_parts
             .next()
             .ok_or_else(|| anyhow::anyhow!("ERR invalid stream ID format: missing millis"))?;
-        let seq_part = id_parts
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("ERR invalid stream ID format: missing sequence"))?;
+        let seq_part = id_parts.next();
 
         let millisecond_time = match millis_part {
-            "*" => unimplemented!("Auto-generation of millisecond time is not implemented"),
+            "*" => SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("expected future time")
+                .as_millis(),
             _ => millis_part
-                .parse::<usize>()
+                .parse::<u128>()
                 .map_err(|_| anyhow::anyhow!("ERR invalid millisecond timestamp in stream ID"))?,
         };
 
@@ -387,7 +386,7 @@ impl Db {
         }
 
         let sequence_number = match seq_part {
-            "*" => match prev_entry_id {
+            Some("*") | None => match prev_entry_id {
                 Some(prev) if prev.millisecond_time == millisecond_time => prev.sequence_number + 1,
                 _ => {
                     if millisecond_time == 0 {
@@ -397,7 +396,7 @@ impl Db {
                     }
                 }
             },
-            _ => seq_part
+            Some(seq) => seq
                 .parse::<usize>()
                 .map_err(|_| anyhow::anyhow!("ERR invalid sequence number in stream ID"))?,
         };
@@ -578,5 +577,14 @@ mod db_tests {
             .await;
         assert!(add_res.is_ok());
         assert_eq!("0-1", add_res.unwrap());
+
+        let add_res = db
+            .x_add(
+                "blue".to_string(),
+                "*".to_string(),
+                &["r".to_string(), "s".to_string()],
+            )
+            .await;
+        assert!(add_res.is_ok());
     }
 }
