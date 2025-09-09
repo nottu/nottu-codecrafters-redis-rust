@@ -98,10 +98,6 @@ impl RESP {
             }
         }
     }
-
-    pub fn empty_array() -> Self {
-        Self::Array(VecDeque::new())
-    }
 }
 
 impl From<RESP> for OsString {

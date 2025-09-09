@@ -125,6 +125,10 @@ async fn process_connection(stream: TcpStream, cache: Db) -> anyhow::Result<()> 
                     None => connection.write_nil_array().await?,
                 }
             }
+            commands::Command::Type { key } => {
+                let entry_type = cache.entry_type(key).await;
+                connection.write_simple(entry_type).await?;
+            }
         }
         connection.flush().await?;
     }

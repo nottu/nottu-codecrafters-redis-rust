@@ -52,6 +52,10 @@ pub enum Command {
         list_key: String,
         time_out: f64,
     },
+    #[command(alias = "TYPE")]
+    Type {
+        key: String,
+    },
     Close,
 }
 

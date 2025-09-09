@@ -128,24 +128,19 @@ impl Db {
     // GET only handles string values.
     pub async fn get(&self, key: String) -> Option<Vec<u8>> {
         let mut locked_cache = self.data.lock().await;
-        if let Some(CacheEntry { value, expire_at }) = locked_cache.get(&key) {
-            let Entry::Data(value) = value else {
-                panic!("should be a vec<u8>")
-            };
-            match expire_at {
-                None => Some(value.clone()),
-                Some(expiry) => {
-                    if Instant::now() >= *expiry {
-                        eprintln!("Key is expired");
-                        locked_cache.remove(&key);
-                        None
-                    } else {
-                        Some(value.clone())
-                    }
-                }
-            }
-        } else {
+        let Some(entry) = locked_cache.get(&key) else {
+            return None;
+        };
+        let Entry::Data(value) = &entry.value else {
+            panic!("should be a vec<u8>")
+        };
+        // return value if not expired
+        if entry.expired() {
+            eprintln!("Key is expired");
+            locked_cache.remove(&key);
             None
+        } else {
+            Some(value.clone())
         }
     }
     pub async fn r_push(&self, key: String, values: Vec<String>) -> anyhow::Result<usize> {
@@ -229,6 +224,39 @@ impl Db {
                 }
             } else {
                 self.notify.notified().await;
+            }
+        }
+    }
+
+    pub async fn entry_type(&self, key: String) -> &'static str {
+        let mut locked_cache = self.data.lock().await;
+        let Some(entry) = locked_cache.get(&key) else {
+            return "none";
+        };
+
+        if entry.expired() {
+            eprintln!("Key is expired");
+            locked_cache.remove(&key);
+            return "none";
+        }
+
+        match entry.value {
+            Entry::Data(_) => "string",
+            Entry::List(_) => "list",
+        }
+    }
+}
+
+impl CacheEntry {
+    fn expired(&self) -> bool {
+        match self.expire_at {
+            None => false,
+            Some(expiry) => {
+                if Instant::now() >= expiry {
+                    true
+                } else {
+                    false
+                }
             }
         }
     }
