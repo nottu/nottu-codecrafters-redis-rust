@@ -107,6 +107,22 @@ async fn process_connection(stream: TcpStream, cache: Db) -> anyhow::Result<()> 
                     }
                 }
             }
+            commands::Command::Blpop { list_key, time_out } => {
+                let timeout = if time_out == 0 {
+                    None
+                } else {
+                    Some(Instant::now() + Duration::from_secs(time_out as u64))
+                };
+                let popped = cache.bl_pop(list_key.clone(), timeout).await?;
+                match popped {
+                    Some(popped) => {
+                        connection
+                            .write_array(&[list_key.into_bytes(), popped])
+                            .await?
+                    }
+                    None => connection.write_array(&[]).await?,
+                }
+            }
         }
         connection.flush().await?;
     }

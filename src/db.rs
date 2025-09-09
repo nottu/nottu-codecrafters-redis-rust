@@ -3,7 +3,11 @@ use std::{
     sync::Arc,
 };
 
-use tokio::{sync::Mutex, time::Instant};
+use anyhow::Ok;
+use tokio::{
+    sync::{Mutex, Notify},
+    time::Instant,
+};
 
 #[derive(Debug)]
 struct CacheEntry {
@@ -96,17 +100,20 @@ impl Entry {
 #[derive(Debug)]
 pub struct Db {
     data: Arc<Mutex<HashMap<String, CacheEntry>>>,
+    notify: Arc<Notify>,
 }
 
 impl Db {
     pub fn new() -> Self {
         Self {
             data: Arc::new(Mutex::new(HashMap::new())),
+            notify: Arc::new(Notify::new()),
         }
     }
     pub fn clone(&self) -> Self {
         Self {
             data: self.data.clone(),
+            notify: self.notify.clone(),
         }
     }
     pub async fn set(&self, key: String, value: String, expire_at: Option<Instant>) {
@@ -147,7 +154,9 @@ impl Db {
             value: Entry::List(VecDeque::new()),
             expire_at: None,
         });
-        entry.value.push(values)
+        let size = entry.value.push(values)?;
+        self.notify.notify_waiters();
+        Ok(size)
     }
     pub async fn l_push(&self, key: String, values: Vec<String>) -> anyhow::Result<usize> {
         let mut locked_cache = self.data.lock().await;
@@ -155,7 +164,9 @@ impl Db {
             value: Entry::List(VecDeque::new()),
             expire_at: None,
         });
-        entry.value.append(values)
+        let size = entry.value.append(values)?;
+        self.notify.notify_waiters();
+        Ok(size)
     }
     pub async fn l_range(
         &self,
@@ -189,6 +200,32 @@ impl Db {
             }
             std::collections::hash_map::Entry::Vacant(_) => Ok(None),
         }
+    }
+    /// `bl_pop` is a blocking variant of the `l_pop`.
+    /// It allows clients to wait for an element to become available on one or more lists.
+    ///
+    /// If the list is empty, the command blocks until:
+    /// - An element is pushed to the list
+    /// - Or the specified timeout is reached (in seconds)
+    ///         - It blocks indefinitely if the timeout specified is 0.
+    pub async fn bl_pop(
+        &self,
+        key: String,
+        timeout: Option<Instant>,
+    ) -> anyhow::Result<Option<EntryData>> {
+        loop {
+            if let Some(timeout) = timeout {
+                if timeout < Instant::now() {
+                    break;
+                }
+            }
+            let val = self.l_pop(key.clone(), 1).await?;
+            if let Some(val) = val {
+                return Ok(val.into_iter().next());
+            }
+            self.notify.notified().await;
+        }
+        Ok(None)
     }
 }
 

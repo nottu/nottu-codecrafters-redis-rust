@@ -47,6 +47,11 @@ pub enum Command {
         list_key: String,
         num_elems: Option<usize>,
     },
+    #[command(alias = "BLPOP")]
+    Blpop {
+        list_key: String,
+        time_out: usize,
+    },
     Close,
 }
 
