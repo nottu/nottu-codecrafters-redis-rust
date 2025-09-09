@@ -92,6 +92,12 @@ impl Connection {
         }
         Ok(())
     }
+    pub async fn write_simple_err(&mut self, err: &str) -> anyhow::Result<()> {
+        self.stream.write_all(b"-").await?;
+        self.stream.write_all(err.as_bytes()).await?;
+        self.stream.write_all(b"\r\n").await?;
+        Ok(())
+    }
     pub async fn flush(&mut self) -> anyhow::Result<()> {
         self.stream.flush().await?;
         Ok(())

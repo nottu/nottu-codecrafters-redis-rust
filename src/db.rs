@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{BTreeMap, HashMap, VecDeque},
     sync::Arc,
 };
 
@@ -13,7 +13,13 @@ enum Entry {
     Data(EntryData),
     List(NotifiedList),
     // TODO: look into better options
-    Stream(HashMap<String, HashMap<String, String>>),
+    Stream(BTreeMap<StreamId, HashMap<String, String>>),
+}
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct StreamId {
+    millisecond_time: usize,
+    sequence_number: usize,
 }
 
 #[derive(Debug)]
@@ -324,17 +330,83 @@ impl Db {
         let mut locked_cache = self.data.lock().await;
 
         let entry = locked_cache.entry(key).or_insert(CacheEntry {
-            value: Entry::Stream(HashMap::new()),
+            value: Entry::Stream(BTreeMap::new()),
             expire_at: None,
         });
         let Entry::Stream(stream_map) = &mut entry.value else {
             anyhow::bail!("Entry is not a stream");
         };
-        let stream_entry = stream_map.entry(stream_id).or_insert(HashMap::new());
+
+        let prev_entry_id = stream_map.last_key_value().map(|(k, _v)| k);
+        let entry_id = Self::get_next_stream_entry_id(&stream_id, prev_entry_id)?;
+
+        let stream_entry = stream_map.entry(entry_id).or_insert(HashMap::new());
         for (field, value) in field_values.chunks_exact(2).map(|c| (&c[0], &c[1])) {
             let _ = stream_entry.insert(field.clone(), value.clone());
         }
         Ok(())
+    }
+    /// Gets next entry_id and validates it.
+    /// stream id are always composed of two integers: `<millisecondsTime>`-`<sequenceNumber>`
+    /// Entry IDs are unique within a stream, and they're guaranteed to be incremental
+    fn get_next_stream_entry_id(
+        entry_id: &str,
+        prev_entry_id: Option<&StreamId>,
+    ) -> anyhow::Result<StreamId> {
+        if entry_id == "*" {
+            unimplemented!("Auto-generation of entry ID is not implemented");
+        }
+        if entry_id == "0-0" {
+            anyhow::bail!("ERR The ID specified in XADD must be greater than 0-0");
+        }
+
+        let mut id_parts = entry_id.splitn(2, "-");
+
+        let millis_part = id_parts
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("ERR invalid stream ID format: missing millis"))?;
+        let seq_part = id_parts
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("ERR invalid stream ID format: missing sequence"))?;
+
+        let millisecond_time = match millis_part {
+            "*" => unimplemented!("Auto-generation of millisecond time is not implemented"),
+            _ => millis_part
+                .parse::<usize>()
+                .map_err(|_| anyhow::anyhow!("ERR invalid millisecond timestamp in stream ID"))?,
+        };
+
+        if let Some(prev_entry_id) = prev_entry_id {
+            if prev_entry_id.millisecond_time > millisecond_time {
+                eprintln!("matching prev ids?");
+                anyhow::bail!("ERR The ID specified in XADD is equal or smaller than the target stream top item");
+            }
+        }
+
+        let sequence_number = match seq_part {
+            "*" => match prev_entry_id {
+                Some(prev) if prev.millisecond_time == millisecond_time => prev.sequence_number + 1,
+                _ => 0,
+            },
+            _ => seq_part
+                .parse::<usize>()
+                .map_err(|_| anyhow::anyhow!("ERR invalid sequence number in stream ID"))?,
+        };
+
+        let new_entry_id = StreamId {
+            millisecond_time,
+            sequence_number,
+        };
+
+        if let Some(prev) = prev_entry_id {
+            if new_entry_id <= *prev {
+                anyhow::bail!(
+                    "ERR The ID specified in XADD is equal or smaller than the target stream top item"
+                );
+            }
+        }
+
+        Ok(new_entry_id)
     }
 }
 
@@ -406,5 +478,48 @@ mod db_tests {
             return;
         };
         assert_eq!(result, vec![b"pear".to_vec(), b"blueberry".to_vec()]);
+    }
+
+    #[tokio::test]
+    async fn test_x_add() {
+        let db = Db::new();
+        let add_res = db
+            .x_add(
+                "mango".to_string(),
+                "1-1".to_string(),
+                &["r".to_string(), "s".to_string()],
+            )
+            .await;
+        assert!(add_res.is_ok());
+        let add_res = db
+            .x_add(
+                "mango".to_string(),
+                "1-1".to_string(),
+                &["r".to_string(), "s".to_string()],
+            )
+            .await;
+        dbg!(&add_res);
+        assert!(add_res.is_err());
+        let err = add_res.unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "ERR The ID specified in XADD is equal or smaller than the target stream top item"
+                .to_string()
+        );
+
+        let add_res = db
+            .x_add(
+                "mango".to_string(),
+                "0-0".to_string(),
+                &["r".to_string(), "s".to_string()],
+            )
+            .await;
+        dbg!(&add_res);
+        assert!(add_res.is_err());
+        let err = add_res.unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "ERR The ID specified in XADD must be greater than 0-0".to_string()
+        )
     }
 }
