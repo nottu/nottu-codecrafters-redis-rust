@@ -34,7 +34,6 @@ impl Connection {
         let data = str::from_utf8(&self.buf[..bytes_read])?;
         dbg!(data);
         let data = RESP::try_parse(data)?;
-        eprintln!("Parsed: {data:?}");
         let RESP::Array(command_args) = data else {
             return Err(anyhow::anyhow!(
                 "expected an array with command and arguments, got {data:?}"
@@ -48,6 +47,10 @@ impl Connection {
     }
     pub async fn write_nil(&mut self) -> anyhow::Result<()> {
         self.stream.write_all(b"$-1\r\n").await?;
+        Ok(())
+    }
+    pub async fn write_nil_array(&mut self) -> anyhow::Result<()> {
+        self.stream.write_all(b"*-1\r\n").await?;
         Ok(())
     }
     pub async fn write_simple(&mut self, s: &str) -> anyhow::Result<()> {

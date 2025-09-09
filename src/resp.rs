@@ -13,14 +13,9 @@ impl RESP {
     pub const NULL_BULK: &'static str = "$-1\r\n";
 
     pub fn try_parse(s: &str) -> anyhow::Result<Self> {
-        eprintln!("Parsing: {s:?}");
-        Self::recursive_parse(s).map(|(r, _cnt)| {
-            // eprint!("Read {cnt} bytes, remaining str {}", &s[cnt..]);
-            r
-        })
+        Self::recursive_parse(s).map(|(r, _cnt)| r)
     }
     fn recursive_parse(s: &str) -> anyhow::Result<(Self, usize)> {
-        dbg!(s);
         let resp_type = &s[..1];
         let val = &s[1..];
         let resp = match resp_type {
@@ -67,7 +62,6 @@ impl RESP {
                 let mut offset = 2 + break_idx;
                 for _ in 0..len {
                     let (v, bytes_read) = Self::recursive_parse(&val[offset..])?;
-                    // dbg!(&v, bytes_read);
                     vals.push_back(v);
                     offset += bytes_read;
                 }

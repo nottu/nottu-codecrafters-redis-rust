@@ -6,7 +6,7 @@ use std::{
 use anyhow::Ok;
 use tokio::{
     sync::{Mutex, Notify},
-    time::Instant,
+    time::{sleep, Instant},
 };
 
 #[derive(Debug)]
@@ -214,18 +214,23 @@ impl Db {
         timeout: Option<Instant>,
     ) -> anyhow::Result<Option<EntryData>> {
         loop {
-            if let Some(timeout) = timeout {
-                if timeout < Instant::now() {
-                    break;
-                }
-            }
             let val = self.l_pop(key.clone(), 1).await?;
             if let Some(val) = val {
                 return Ok(val.into_iter().next());
             }
-            self.notify.notified().await;
+            if let Some(timeout) = timeout {
+                let time_remaining = timeout - Instant::now();
+                tokio::select! {
+                    _ = self.notify.notified() => (),
+                    _ = sleep(time_remaining) => {
+                        eprintln!("bl_pop timed out");
+                        return Ok(None);
+                    }
+                }
+            } else {
+                self.notify.notified().await;
+            }
         }
-        Ok(None)
     }
 }
 

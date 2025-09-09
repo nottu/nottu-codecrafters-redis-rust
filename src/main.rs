@@ -113,14 +113,16 @@ async fn process_connection(stream: TcpStream, cache: Db) -> anyhow::Result<()> 
                 } else {
                     Some(Instant::now() + Duration::from_secs_f64(time_out))
                 };
-                let popped = cache.bl_pop(list_key.clone(), timeout).await?;
-                match popped {
+                eprint!("calling bl_popped");
+                let popped = cache.bl_pop(list_key.clone(), timeout).await;
+                eprintln!("bl_poped returned {popped:?}");
+                match popped? {
                     Some(popped) => {
                         connection
                             .write_array(&[list_key.into_bytes(), popped])
                             .await?
                     }
-                    None => connection.write_array(&[]).await?,
+                    None => connection.write_nil_array().await?,
                 }
             }
         }
