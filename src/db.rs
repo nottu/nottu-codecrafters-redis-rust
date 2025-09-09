@@ -3,11 +3,44 @@ use std::{
     sync::Arc,
 };
 
-use anyhow::Ok;
 use tokio::{
-    sync::{Mutex, Notify},
-    time::{sleep, Instant},
+    sync::{oneshot, Mutex, Notify},
+    time::Instant,
 };
+
+#[derive(Debug)]
+enum Entry {
+    Data(EntryData),
+    List(NotifiedList),
+}
+
+#[derive(Debug)]
+struct NotifiedList {
+    list: VecDeque<EntryData>,
+    waiters: VecDeque<oneshot::Sender<()>>,
+}
+
+impl NotifiedList {
+    fn new() -> Self {
+        Self {
+            list: VecDeque::new(),
+            waiters: VecDeque::new(),
+        }
+    }
+    fn notify_one(&mut self) {
+        while let Some(waiter) = self.waiters.pop_front() {
+            if waiter.send(()).is_ok() {
+                break; // success
+            }
+            // If sending failed, receiver dropped; try the next one
+        }
+    }
+    fn add_waiter(&mut self) -> oneshot::Receiver<()> {
+        let (tx, rx) = oneshot::channel();
+        self.waiters.push_back(tx);
+        rx
+    }
+}
 
 #[derive(Debug)]
 struct CacheEntry {
@@ -15,54 +48,69 @@ struct CacheEntry {
     expire_at: Option<Instant>,
 }
 
-#[derive(Debug)]
-enum Entry {
-    Data(EntryData),
-    List(VecDeque<EntryData>),
+impl CacheEntry {
+    fn expired(&self) -> bool {
+        match self.expire_at {
+            None => false,
+            Some(expiry) => {
+                if Instant::now() >= expiry {
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+    }
 }
 
 type EntryData = Vec<u8>;
 
 impl Entry {
     fn push(&mut self, data: Vec<String>) -> anyhow::Result<usize> {
-        if let Entry::List(list) = self {
+        if let Entry::List(notify_list) = self {
             for elem in data {
-                list.push_back(elem.into_bytes());
+                notify_list.list.push_back(elem.into_bytes());
+                notify_list.notify_one();
             }
-            Ok(list.len())
+            Ok(notify_list.list.len())
         } else {
             Err(anyhow::anyhow!("Entry is not a List type"))
         }
     }
     fn append(&mut self, data: Vec<String>) -> anyhow::Result<usize> {
-        if let Entry::List(list) = self {
+        if let Entry::List(notify_list) = self {
             for elem in data {
-                list.push_front(elem.into_bytes());
+                notify_list.list.push_front(elem.into_bytes());
+                notify_list.notify_one();
             }
-            Ok(list.len())
+            Ok(notify_list.list.len())
         } else {
             Err(anyhow::anyhow!("Entry is not a List type"))
         }
     }
     fn range(&self, start: i64, end: i64) -> anyhow::Result<Vec<EntryData>> {
-        let Entry::List(list) = self else {
+        let Entry::List(notify_list) = self else {
             return Err(anyhow::anyhow!("Entry is not a List type"));
         };
         let start = if start >= 0 {
             start as usize
         } else {
-            list.len().saturating_sub((start.abs()) as usize)
+            notify_list
+                .list
+                .len()
+                .saturating_sub((start.abs()) as usize)
         };
         let end = if end >= 0 {
             end as usize
         } else {
-            list.len().saturating_sub((end.abs()) as usize)
+            notify_list.list.len().saturating_sub((end.abs()) as usize)
         };
         eprintln!(
             "list_len: {}, getting vals in range [{start},{end}]",
-            list.len()
+            notify_list.list.len()
         );
-        Ok(list
+        Ok(notify_list
+            .list
             .iter()
             .take(end + 1)
             .skip(start)
@@ -70,17 +118,17 @@ impl Entry {
             .collect())
     }
     fn len(&self) -> anyhow::Result<usize> {
-        if let Entry::List(list) = self {
-            Ok(list.len())
+        if let Entry::List(notify_list) = self {
+            Ok(notify_list.list.len())
         } else {
             Err(anyhow::anyhow!("Entry is not a List type"))
         }
     }
     fn l_pop(&mut self, num_elems: usize) -> anyhow::Result<Option<Vec<EntryData>>> {
-        if let Entry::List(list) = self {
+        if let Entry::List(notify_list) = self {
             let mut data = Vec::with_capacity(num_elems);
             for _ in 0..num_elems {
-                let Some(elem) = list.pop_front() else {
+                let Some(elem) = notify_list.list.pop_front() else {
                     break;
                 };
                 data.push(elem);
@@ -146,7 +194,7 @@ impl Db {
     pub async fn r_push(&self, key: String, values: Vec<String>) -> anyhow::Result<usize> {
         let mut locked_cache = self.data.lock().await;
         let entry = locked_cache.entry(key).or_insert(CacheEntry {
-            value: Entry::List(VecDeque::new()),
+            value: Entry::List(NotifiedList::new()),
             expire_at: None,
         });
         let size = entry.value.push(values)?;
@@ -156,7 +204,7 @@ impl Db {
     pub async fn l_push(&self, key: String, values: Vec<String>) -> anyhow::Result<usize> {
         let mut locked_cache = self.data.lock().await;
         let entry = locked_cache.entry(key).or_insert(CacheEntry {
-            value: Entry::List(VecDeque::new()),
+            value: Entry::List(NotifiedList::new()),
             expire_at: None,
         });
         let size = entry.value.append(values)?;
@@ -209,21 +257,36 @@ impl Db {
         timeout: Option<Instant>,
     ) -> anyhow::Result<Option<EntryData>> {
         loop {
-            let val = self.l_pop(key.clone(), 1).await?;
-            if let Some(val) = val {
-                return Ok(val.into_iter().next());
+            let mut locked_cache = self.data.lock().await;
+
+            let entry = locked_cache.entry(key.clone()).or_insert(CacheEntry {
+                value: Entry::List(NotifiedList::new()),
+                expire_at: None,
+            });
+
+            let Entry::List(list) = &mut entry.value else {
+                return Err(anyhow::anyhow!("Entry is not a list type"));
+            };
+
+            if let Some(data) = list.list.pop_front() {
+                return Ok(Some(data));
             }
+
+            // no data, add waiter to list
+            let waiter = list.add_waiter();
+            // release cache, so others operations can go through
+            drop(locked_cache);
+
             if let Some(timeout) = timeout {
-                let time_remaining = timeout - Instant::now();
-                tokio::select! {
-                    _ = self.notify.notified() => (),
-                    _ = sleep(time_remaining) => {
-                        eprintln!("bl_pop timed out");
+                match tokio::time::timeout_at(timeout, waiter).await {
+                    Ok(_) => (),
+                    Err(e) => {
+                        eprintln!("{e:?}");
                         return Ok(None);
                     }
                 }
             } else {
-                self.notify.notified().await;
+                waiter.await?;
             }
         }
     }
@@ -243,21 +306,6 @@ impl Db {
         match entry.value {
             Entry::Data(_) => "string",
             Entry::List(_) => "list",
-        }
-    }
-}
-
-impl CacheEntry {
-    fn expired(&self) -> bool {
-        match self.expire_at {
-            None => false,
-            Some(expiry) => {
-                if Instant::now() >= expiry {
-                    true
-                } else {
-                    false
-                }
-            }
         }
     }
 }
