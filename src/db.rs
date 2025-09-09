@@ -12,6 +12,8 @@ use tokio::{
 enum Entry {
     Data(EntryData),
     List(NotifiedList),
+    // TODO: look into better options
+    Stream(HashMap<String, HashMap<String, String>>),
 }
 
 #[derive(Debug)]
@@ -306,7 +308,33 @@ impl Db {
         match entry.value {
             Entry::Data(_) => "string",
             Entry::List(_) => "list",
+            Entry::Stream(_) => "stream",
         }
+    }
+
+    pub async fn x_add(
+        &self,
+        key: String,
+        stream_id: String,
+        field_values: &[String],
+    ) -> anyhow::Result<()> {
+        if field_values.len() % 2 != 0 {
+            anyhow::bail!("Expected even number of field-value args");
+        }
+        let mut locked_cache = self.data.lock().await;
+
+        let entry = locked_cache.entry(key).or_insert(CacheEntry {
+            value: Entry::Stream(HashMap::new()),
+            expire_at: None,
+        });
+        let Entry::Stream(stream_map) = &mut entry.value else {
+            anyhow::bail!("Entry is not a stream");
+        };
+        let stream_entry = stream_map.entry(stream_id).or_insert(HashMap::new());
+        for (field, value) in field_values.chunks_exact(2).map(|c| (&c[0], &c[1])) {
+            let _ = stream_entry.insert(field.clone(), value.clone());
+        }
+        Ok(())
     }
 }
 

@@ -56,6 +56,13 @@ pub enum Command {
     Type {
         key: String,
     },
+    #[command(alias = "XADD")]
+    Xadd {
+        key: String,
+        stream_id: String,
+        #[arg(required = true)]
+        data: Vec<String>,
+    },
     Close,
 }
 
