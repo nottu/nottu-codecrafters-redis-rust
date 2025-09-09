@@ -108,10 +108,10 @@ async fn process_connection(stream: TcpStream, cache: Db) -> anyhow::Result<()> 
                 }
             }
             commands::Command::Blpop { list_key, time_out } => {
-                let timeout = if time_out == 0 {
+                let timeout = if time_out == 0.0 {
                     None
                 } else {
-                    Some(Instant::now() + Duration::from_secs(time_out as u64))
+                    Some(Instant::now() + Duration::from_secs_f64(time_out))
                 };
                 let popped = cache.bl_pop(list_key.clone(), timeout).await?;
                 match popped {

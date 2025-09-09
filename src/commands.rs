@@ -50,7 +50,7 @@ pub enum Command {
     #[command(alias = "BLPOP")]
     Blpop {
         list_key: String,
-        time_out: usize,
+        time_out: f64,
     },
     Close,
 }
