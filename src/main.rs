@@ -132,8 +132,8 @@ async fn process_connection(stream: TcpStream, cache: Db) -> anyhow::Result<()> 
                 key,
                 stream_id,
                 data,
-            } => match cache.x_add(key, stream_id.clone(), &data).await {
-                Ok(_) => connection.write_bytes(stream_id.as_bytes()).await?,
+            } => match cache.x_add(key, stream_id, &data).await {
+                Ok(stream_id) => connection.write_bytes(stream_id.as_bytes()).await?,
                 Err(err) => connection.write_simple_err(&err.to_string()).await?,
             },
         }

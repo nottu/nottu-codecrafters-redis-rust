@@ -16,7 +16,7 @@ enum Entry {
     Stream(BTreeMap<StreamId, HashMap<String, String>>),
 }
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 struct StreamId {
     millisecond_time: usize,
     sequence_number: usize,
@@ -323,7 +323,7 @@ impl Db {
         key: String,
         stream_id: String,
         field_values: &[String],
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<String> {
         if field_values.len() % 2 != 0 {
             anyhow::bail!("Expected even number of field-value args");
         }
@@ -344,7 +344,10 @@ impl Db {
         for (field, value) in field_values.chunks_exact(2).map(|c| (&c[0], &c[1])) {
             let _ = stream_entry.insert(field.clone(), value.clone());
         }
-        Ok(())
+        Ok(format!(
+            "{}-{}",
+            entry_id.millisecond_time, entry_id.sequence_number
+        ))
     }
     /// Gets next entry_id and validates it.
     /// stream id are always composed of two integers: `<millisecondsTime>`-`<sequenceNumber>`
@@ -386,7 +389,13 @@ impl Db {
         let sequence_number = match seq_part {
             "*" => match prev_entry_id {
                 Some(prev) if prev.millisecond_time == millisecond_time => prev.sequence_number + 1,
-                _ => 0,
+                _ => {
+                    if millisecond_time == 0 {
+                        1
+                    } else {
+                        0
+                    }
+                }
             },
             _ => seq_part
                 .parse::<usize>()
@@ -498,7 +507,6 @@ mod db_tests {
                 &["r".to_string(), "s".to_string()],
             )
             .await;
-        dbg!(&add_res);
         assert!(add_res.is_err());
         let err = add_res.unwrap_err();
         assert_eq!(
@@ -521,5 +529,54 @@ mod db_tests {
             err.to_string(),
             "ERR The ID specified in XADD must be greater than 0-0".to_string()
         )
+    }
+
+    #[tokio::test]
+    async fn test_x_add_auto_seq() {
+        let db = Db::new();
+        let add_res = db
+            .x_add(
+                "mango".to_string(),
+                "1-*".to_string(),
+                &["r".to_string(), "s".to_string()],
+            )
+            .await;
+        assert!(add_res.is_ok());
+        assert_eq!("1-0", add_res.unwrap());
+
+        let add_res = db
+            .x_add(
+                "mango".to_string(),
+                "1-*".to_string(),
+                &["r".to_string(), "s".to_string()],
+            )
+            .await;
+        assert!(add_res.is_ok());
+        assert_eq!("1-1", add_res.unwrap());
+
+        let add_res = db
+            .x_add(
+                "mango".to_string(),
+                "1-0".to_string(),
+                &["r".to_string(), "s".to_string()],
+            )
+            .await;
+        assert!(add_res.is_err());
+        let err = add_res.unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "ERR The ID specified in XADD is equal or smaller than the target stream top item"
+                .to_string()
+        );
+
+        let add_res = db
+            .x_add(
+                "blue".to_string(),
+                "0-*".to_string(),
+                &["r".to_string(), "s".to_string()],
+            )
+            .await;
+        assert!(add_res.is_ok());
+        assert_eq!("0-1", add_res.unwrap());
     }
 }
