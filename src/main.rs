@@ -79,11 +79,11 @@ async fn process_connection(stream: TcpStream, cache: Db) -> anyhow::Result<()> 
                 start,
                 end,
             } => {
-                let res = cache.l_range(list_key, start, end).await?.unwrap_or(vec![]);
+                let res = cache.l_range(list_key, start, end).await?;
                 connection.write_array(&res).await?;
             }
             commands::Command::Llen { list_key } => {
-                let num_elems = cache.l_len(list_key).await.unwrap_or(0);
+                let num_elems = cache.l_len(list_key).await?;
                 connection.write_int(num_elems as u64).await?;
             }
             commands::Command::Lpop {
@@ -91,19 +91,13 @@ async fn process_connection(stream: TcpStream, cache: Db) -> anyhow::Result<()> 
                 num_elems,
             } => {
                 let popped = cache.l_pop(list_key, num_elems.unwrap_or(1)).await?;
-                match popped {
-                    Some(poped) => {
-                        if poped.len() == 1 {
-                            // guaranteed to have one value, this way we don't clone
-                            let val = poped.into_iter().next().unwrap();
-                            connection.write_bytes(&val).await?;
-                        } else {
-                            connection.write_array(&poped).await?;
-                        }
-                    }
-                    None => {
-                        connection.write_array(&[]).await?;
-                    }
+
+                if popped.len() == 1 {
+                    // guaranteed to have one value, this way we don't clone
+                    let val = popped.into_iter().next().unwrap();
+                    connection.write_bytes(&val).await?;
+                } else {
+                    connection.write_array(&popped).await?;
                 }
             }
             commands::Command::Blpop { list_key, time_out } => {

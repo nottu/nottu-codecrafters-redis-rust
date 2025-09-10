@@ -6,7 +6,7 @@ use std::{
 };
 
 use tokio::{
-    sync::{oneshot, Mutex, Notify},
+    sync::{oneshot, Mutex},
     time::Instant,
 };
 
@@ -14,7 +14,7 @@ use crate::resp::Frame;
 
 #[derive(Debug)]
 enum Entry {
-    Data(EntryData),
+    Data(ExpireableData),
     List(NotifiedList),
     // TODO: look into better options
     Stream(BTreeMap<StreamId, BTreeMap<String, String>>),
@@ -61,6 +61,7 @@ impl NotifiedList {
             waiters: VecDeque::new(),
         }
     }
+
     fn notify_one(&mut self) {
         while let Some(waiter) = self.waiters.pop_front() {
             if waiter.send(()).is_ok() {
@@ -69,20 +70,62 @@ impl NotifiedList {
             // If sending failed, receiver dropped; try the next one
         }
     }
+
     fn add_waiter(&mut self) -> oneshot::Receiver<()> {
         let (tx, rx) = oneshot::channel();
         self.waiters.push_back(tx);
         rx
     }
+
+    fn push_back(&mut self, val: EntryData) {
+        self.list.push_back(val);
+        self.notify_one();
+    }
+
+    fn push_front(&mut self, val: EntryData) {
+        self.list.push_front(val);
+        self.notify_one();
+    }
+
+    fn pop_front(&mut self) -> Option<EntryData> {
+        self.list.pop_front()
+    }
+
+    fn len(&self) -> usize {
+        self.list.len()
+    }
+
+    fn range(&self, start: i64, end: i64) -> Vec<EntryData> {
+        let start = if start >= 0 {
+            start as usize
+        } else {
+            self.list.len().saturating_sub((start.abs()) as usize)
+        };
+        let end = if end >= 0 {
+            end as usize
+        } else {
+            self.list.len().saturating_sub((end.abs()) as usize)
+        };
+        eprintln!(
+            "list_len: {}, getting vals in range [{start},{end}]",
+            self.list.len()
+        );
+        self.list
+            .iter()
+            .take(end + 1)
+            .skip(start)
+            .map(|r| r.to_owned())
+            .collect()
+    }
 }
 
 #[derive(Debug)]
-struct CacheEntry {
-    value: Entry,
+struct ExpireableData {
+    value: EntryData,
     expire_at: Option<Instant>,
 }
 
-impl CacheEntry {
+impl ExpireableData {
     fn expired(&self) -> bool {
         match self.expire_at {
             None => false,
@@ -99,81 +142,6 @@ impl CacheEntry {
 
 type EntryData = Vec<u8>;
 
-impl Entry {
-    fn push(&mut self, data: Vec<String>) -> anyhow::Result<usize> {
-        if let Entry::List(notify_list) = self {
-            for elem in data {
-                notify_list.list.push_back(elem.into_bytes());
-                notify_list.notify_one();
-            }
-            Ok(notify_list.list.len())
-        } else {
-            Err(anyhow::anyhow!("Entry is not a List type"))
-        }
-    }
-    fn append(&mut self, data: Vec<String>) -> anyhow::Result<usize> {
-        if let Entry::List(notify_list) = self {
-            for elem in data {
-                notify_list.list.push_front(elem.into_bytes());
-                notify_list.notify_one();
-            }
-            Ok(notify_list.list.len())
-        } else {
-            Err(anyhow::anyhow!("Entry is not a List type"))
-        }
-    }
-    fn range(&self, start: i64, end: i64) -> anyhow::Result<Vec<EntryData>> {
-        let Entry::List(notify_list) = self else {
-            return Err(anyhow::anyhow!("Entry is not a List type"));
-        };
-        let start = if start >= 0 {
-            start as usize
-        } else {
-            notify_list
-                .list
-                .len()
-                .saturating_sub((start.abs()) as usize)
-        };
-        let end = if end >= 0 {
-            end as usize
-        } else {
-            notify_list.list.len().saturating_sub((end.abs()) as usize)
-        };
-        eprintln!(
-            "list_len: {}, getting vals in range [{start},{end}]",
-            notify_list.list.len()
-        );
-        Ok(notify_list
-            .list
-            .iter()
-            .take(end + 1)
-            .skip(start)
-            .map(|r| r.to_owned())
-            .collect())
-    }
-    fn len(&self) -> anyhow::Result<usize> {
-        if let Entry::List(notify_list) = self {
-            Ok(notify_list.list.len())
-        } else {
-            Err(anyhow::anyhow!("Entry is not a List type"))
-        }
-    }
-    fn l_pop(&mut self, num_elems: usize) -> anyhow::Result<Option<Vec<EntryData>>> {
-        if let Entry::List(notify_list) = self {
-            let mut data = Vec::with_capacity(num_elems);
-            for _ in 0..num_elems {
-                let Some(elem) = notify_list.list.pop_front() else {
-                    break;
-                };
-                data.push(elem);
-            }
-            Ok(if data.is_empty() { None } else { Some(data) })
-        } else {
-            Err(anyhow::anyhow!("Entry is not a List type"))
-        }
-    }
-}
-
 /// Basic shared cache with passive expiry.
 // TODO: Periodically remove expired entries
 /// From the [resis docs](https://redis.io/docs/latest/commands/expire/#how-redis-expires-keys)
@@ -181,103 +149,122 @@ impl Entry {
 /// and the key is found to be timed out.
 #[derive(Debug)]
 pub struct Db {
-    data: Arc<Mutex<HashMap<String, CacheEntry>>>,
-    notify: Arc<Notify>,
+    data: Arc<Mutex<HashMap<String, Entry>>>,
 }
 
 impl Db {
     pub fn new() -> Self {
         Self {
             data: Arc::new(Mutex::new(HashMap::new())),
-            notify: Arc::new(Notify::new()),
         }
     }
+    /// Clones internal Arc references and returns a struct with said clones
     pub fn clone(&self) -> Self {
         Self {
             data: self.data.clone(),
-            notify: self.notify.clone(),
         }
     }
+
     pub async fn set(&self, key: String, value: String, expire_at: Option<Instant>) {
-        let entry = CacheEntry {
-            value: Entry::Data(value.into_bytes()),
+        let expirable_data = ExpireableData {
+            value: value.into_bytes(),
             expire_at,
         };
         let mut locked_cache = self.data.lock().await;
-        locked_cache.insert(key, entry);
+        locked_cache.insert(key, Entry::Data(expirable_data));
     }
-    // Get the value of key. If the key does not exist the special value nil is returned.
-    // GET only handles string values.
+
+    /// Get the value of key. If the key does not exist the special value nil is returned.
+    /// GET only handles string values.
     pub async fn get(&self, key: String) -> Option<Vec<u8>> {
         let mut locked_cache = self.data.lock().await;
         let Some(entry) = locked_cache.get(&key) else {
             return None;
         };
-        let Entry::Data(value) = &entry.value else {
+        let Entry::Data(expirable_data) = &entry else {
             panic!("should be a vec<u8>")
         };
         // return value if not expired
-        if entry.expired() {
+        if expirable_data.expired() {
             eprintln!("Key is expired");
             locked_cache.remove(&key);
             None
         } else {
-            Some(value.clone())
+            Some(expirable_data.value.clone())
         }
     }
+
     pub async fn r_push(&self, key: String, values: Vec<String>) -> anyhow::Result<usize> {
         let mut locked_cache = self.data.lock().await;
-        let entry = locked_cache.entry(key).or_insert(CacheEntry {
-            value: Entry::List(NotifiedList::new()),
-            expire_at: None,
-        });
-        let size = entry.value.push(values)?;
-        self.notify.notify_waiters();
-        Ok(size)
+        let entry = locked_cache
+            .entry(key)
+            .or_insert(Entry::List(NotifiedList::new()));
+
+        let Entry::List(notify_list) = entry else {
+            anyhow::bail!("Entry is not List type");
+        };
+
+        for val in values {
+            notify_list.push_back(val.into_bytes());
+        }
+        Ok(notify_list.len())
     }
+
     pub async fn l_push(&self, key: String, values: Vec<String>) -> anyhow::Result<usize> {
         let mut locked_cache = self.data.lock().await;
-        let entry = locked_cache.entry(key).or_insert(CacheEntry {
-            value: Entry::List(NotifiedList::new()),
-            expire_at: None,
-        });
-        let size = entry.value.append(values)?;
-        self.notify.notify_waiters();
-        Ok(size)
+        let entry = locked_cache
+            .entry(key)
+            .or_insert(Entry::List(NotifiedList::new()));
+
+        let Entry::List(notify_list) = entry else {
+            anyhow::bail!("Entry is not List type");
+        };
+
+        for val in values {
+            notify_list.push_front(val.into_bytes());
+        }
+        Ok(notify_list.len())
     }
-    pub async fn l_range(
-        &self,
-        key: String,
-        start: i64,
-        end: i64,
-    ) -> anyhow::Result<Option<Vec<Vec<u8>>>> {
+
+    pub async fn l_range(&self, key: String, start: i64, end: i64) -> anyhow::Result<Vec<Vec<u8>>> {
         let locked_cache = self.data.lock().await;
-        locked_cache
-            .get(&key)
-            .map(|entry| entry.value.range(start, end))
-            .transpose()
-    }
-    pub async fn l_len(&self, key: String) -> Option<usize> {
-        let locked_cache = self.data.lock().await;
-        locked_cache
-            .get(&key)
-            .map(|entry| entry.value.len().ok())
-            .flatten()
-    }
-    pub async fn l_pop(
-        &self,
-        key: String,
-        num_elems: usize,
-    ) -> anyhow::Result<Option<Vec<EntryData>>> {
-        let mut locked_cache = self.data.lock().await;
-        let entry = locked_cache.entry(key);
-        match entry {
-            std::collections::hash_map::Entry::Occupied(mut entry) => {
-                entry.get_mut().value.l_pop(num_elems)
-            }
-            std::collections::hash_map::Entry::Vacant(_) => Ok(None),
+
+        match locked_cache.get(&key) {
+            None => Ok(vec![]),
+            Some(Entry::List(list)) => Ok(list.range(start, end)),
+            Some(_) => Err(anyhow::anyhow!("Entry is not List type")),
         }
     }
+
+    pub async fn l_len(&self, key: String) -> anyhow::Result<usize> {
+        let locked_cache = self.data.lock().await;
+        locked_cache
+            .get(&key)
+            .map(|entry| match entry {
+                Entry::List(list) => Ok(list.len()),
+                _ => Err(anyhow::anyhow!("Entry is not List type")),
+            })
+            .unwrap_or(Ok(0))
+    }
+
+    pub async fn l_pop(&self, key: String, num_elems: usize) -> anyhow::Result<Vec<EntryData>> {
+        let mut locked_cache = self.data.lock().await;
+        match locked_cache.get_mut(&key) {
+            None => Ok(vec![]),
+            Some(Entry::List(notify_list)) => {
+                let mut data = Vec::with_capacity(num_elems);
+                for _ in 0..num_elems {
+                    let Some(elem) = notify_list.pop_front() else {
+                        break;
+                    };
+                    data.push(elem);
+                }
+                Ok(data)
+            }
+            Some(_) => Err(anyhow::anyhow!("Entry is not List type")),
+        }
+    }
+
     /// `bl_pop` is a blocking variant of the `l_pop`.
     /// It allows clients to wait for an element to become available on one or more lists.
     ///
@@ -293,21 +280,20 @@ impl Db {
         loop {
             let mut locked_cache = self.data.lock().await;
 
-            let entry = locked_cache.entry(key.clone()).or_insert(CacheEntry {
-                value: Entry::List(NotifiedList::new()),
-                expire_at: None,
-            });
+            let entry = locked_cache
+                .entry(key.clone())
+                .or_insert(Entry::List(NotifiedList::new()));
 
-            let Entry::List(list) = &mut entry.value else {
+            let Entry::List(notify_list) = entry else {
                 return Err(anyhow::anyhow!("Entry is not a list type"));
             };
 
-            if let Some(data) = list.list.pop_front() {
+            if let Some(data) = notify_list.pop_front() {
                 return Ok(Some(data));
             }
 
             // no data, add waiter to list
-            let waiter = list.add_waiter();
+            let waiter = notify_list.add_waiter();
             // release cache, so others operations can go through
             drop(locked_cache);
 
@@ -331,14 +317,16 @@ impl Db {
             return "none";
         };
 
-        if entry.expired() {
-            eprintln!("Key is expired");
-            locked_cache.remove(&key);
-            return "none";
-        }
-
-        match entry.value {
-            Entry::Data(_) => "string",
+        match entry {
+            Entry::Data(d) => {
+                if d.expired() {
+                    eprintln!("Key is expired");
+                    locked_cache.remove(&key);
+                    "none"
+                } else {
+                    "string"
+                }
+            }
             Entry::List(_) => "list",
             Entry::Stream(_) => "stream",
         }
@@ -355,11 +343,10 @@ impl Db {
         }
         let mut locked_cache = self.data.lock().await;
 
-        let entry = locked_cache.entry(key).or_insert(CacheEntry {
-            value: Entry::Stream(BTreeMap::new()),
-            expire_at: None,
-        });
-        let Entry::Stream(stream_map) = &mut entry.value else {
+        let stream_entry = locked_cache
+            .entry(key)
+            .or_insert(Entry::Stream(BTreeMap::new()));
+        let Entry::Stream(stream_map) = stream_entry else {
             anyhow::bail!("Entry is not a stream");
         };
 
@@ -451,13 +438,14 @@ impl Db {
     ) -> anyhow::Result<Frame> {
         let mut locked_cache = self.data.lock().await;
 
-        let entry = locked_cache.entry(key).or_insert(CacheEntry {
-            value: Entry::Stream(BTreeMap::new()),
-            expire_at: None,
-        });
-        let Entry::Stream(stream_map) = &mut entry.value else {
+        let entry = locked_cache
+            .entry(key)
+            .or_insert(Entry::Stream(BTreeMap::new()));
+
+        let Entry::Stream(stream_map) = entry else {
             anyhow::bail!("Entry is not a stream");
         };
+
         let mut output = vec![];
         for (stream_id, data) in stream_map.range((lower_bound, upper_bound)) {
             let values: Vec<Frame> = data
@@ -559,7 +547,7 @@ mod db_tests {
         let _ = db
             .l_push("orange".to_string(), vec!["blueberry".to_string()])
             .await;
-        assert_eq!(Some(1), db.l_len("orange".to_string()).await);
+        assert_eq!(1, db.l_len("orange".to_string()).await.unwrap());
 
         let _ = db
             .l_push(
@@ -567,16 +555,10 @@ mod db_tests {
                 vec!["pear".to_string(), "apple".to_string()],
             )
             .await;
-        assert_eq!(Some(3), db.l_len("orange".to_string()).await);
+        assert_eq!(3, db.l_len("orange".to_string()).await.unwrap());
 
-        let result = db
-            .l_range("orange".to_string(), 0, -1)
-            .await
-            .expect("valid list");
-        let Some(result) = result else {
-            assert!(false, "list is not valid");
-            return;
-        };
+        let result = db.l_range("orange".to_string(), 0, -1).await.unwrap();
+
         let expected: Vec<_> = ["apple", "pear", "blueberry"]
             .map(|v| v.to_string().into_bytes())
             .into_iter()
@@ -591,7 +573,12 @@ mod db_tests {
         let _ = db
             .l_push("orange".to_string(), vec!["blueberry".to_string()])
             .await;
-        assert_eq!(Some(1), db.l_len("orange".to_string()).await);
+        assert_eq!(
+            1,
+            db.l_len("orange".to_string())
+                .await
+                .expect("expected a list")
+        );
 
         let _ = db
             .l_push(
@@ -599,21 +586,13 @@ mod db_tests {
                 vec!["pear".to_string(), "apple".to_string()],
             )
             .await;
-        assert_eq!(Some(3), db.l_len("orange".to_string()).await);
+        assert_eq!(3, db.l_len("orange".to_string()).await.unwrap());
 
-        let result = db.l_pop("orange".to_string(), 1).await.expect("valid list");
-        let Some(result) = result else {
-            assert!(false, "list is not valid");
-            return;
-        };
+        let result = db.l_pop("orange".to_string(), 1).await.unwrap();
         assert_eq!(result[0], b"apple".to_vec());
 
         // test multi pop
-        let result = db.l_pop("orange".to_string(), 2).await.expect("valid list");
-        let Some(result) = result else {
-            assert!(false, "list is not valid");
-            return;
-        };
+        let result = db.l_pop("orange".to_string(), 2).await.unwrap();
         assert_eq!(result, vec![b"pear".to_vec(), b"blueberry".to_vec()]);
     }
 
