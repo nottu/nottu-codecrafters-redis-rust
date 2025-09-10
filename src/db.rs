@@ -412,7 +412,9 @@ impl Db {
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
         let upper_bound: StreamId = {
-            if upper_bound.contains("-") {
+            if upper_bound == "+" {
+                format!("{}-{}", u128::MAX, usize::MAX)
+            } else if upper_bound.contains("-") {
                 upper_bound
             } else {
                 format!("{upper_bound}-{}", usize::MAX)
@@ -722,6 +724,10 @@ mod db_tests {
         let x_range_res = db
             .x_range("mango".to_string(), "-".to_string(), "2-1".to_string())
             .await;
-        assert!(x_range_res.is_ok())
+        assert!(x_range_res.is_ok());
+        let x_range_res = db
+            .x_range("mango".to_string(), "-".to_string(), "+".to_string())
+            .await;
+        assert!(x_range_res.is_ok());
     }
 }
