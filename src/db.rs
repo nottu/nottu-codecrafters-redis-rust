@@ -390,15 +390,6 @@ impl Db {
         lower_bound: String,
         upper_bound: String,
     ) -> anyhow::Result<Frame> {
-        let mut locked_cache = self.data.lock().await;
-
-        let entry = locked_cache.entry(key).or_insert(CacheEntry {
-            value: Entry::Stream(BTreeMap::new()),
-            expire_at: None,
-        });
-        let Entry::Stream(stream_map) = &mut entry.value else {
-            anyhow::bail!("Entry is not a stream");
-        };
         let lower_bound: StreamId = {
             if lower_bound == "-" {
                 "0-1".to_string()
@@ -423,38 +414,14 @@ impl Db {
         .try_into()
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-        eprintln!("Getting values in range {lower_bound:?}, {upper_bound:?}");
-
-        let mut output = vec![];
-        for (stream_id, data) in
-            stream_map.range((Bound::Included(lower_bound), Bound::Included(upper_bound)))
-        {
-            let values: Vec<Frame> = data
-                .iter()
-                .map(|(k, v)| [k, v])
-                .flatten()
-                .map(|s| Frame::bulk_from_str(s))
-                .collect();
-            output.push(Frame::Array(
-                [
-                    Frame::buld_from_string(stream_id.to_string()),
-                    Frame::Array(values),
-                ]
-                .to_vec(),
-            ));
-        }
-        Ok(Frame::Array(output))
+        self.read_stream(
+            key,
+            Bound::Included(lower_bound),
+            Bound::Included(upper_bound),
+        )
+        .await
     }
     pub async fn x_read(&self, key: String, lower_bound: String) -> anyhow::Result<Frame> {
-        let mut locked_cache = self.data.lock().await;
-
-        let entry = locked_cache.entry(key).or_insert(CacheEntry {
-            value: Entry::Stream(BTreeMap::new()),
-            expire_at: None,
-        });
-        let Entry::Stream(stream_map) = &mut entry.value else {
-            anyhow::bail!("Entry is not a stream");
-        };
         let lower_bound: StreamId = {
             if lower_bound == "-" {
                 "0-1".to_string()
@@ -467,11 +434,31 @@ impl Db {
         .try_into()
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-        eprintln!("Getting values in starting from: {lower_bound:?}");
+        let stream_data = self
+            .read_stream(key.clone(), Bound::Excluded(lower_bound), Bound::Unbounded)
+            .await?;
+        let stream_data = Frame::Array([Frame::buld_from_string(key), stream_data].to_vec());
 
+        Ok(Frame::Array([stream_data].to_vec()))
+    }
+
+    async fn read_stream(
+        &self,
+        key: String,
+        lower_bound: Bound<StreamId>,
+        upper_bound: Bound<StreamId>,
+    ) -> anyhow::Result<Frame> {
+        let mut locked_cache = self.data.lock().await;
+
+        let entry = locked_cache.entry(key).or_insert(CacheEntry {
+            value: Entry::Stream(BTreeMap::new()),
+            expire_at: None,
+        });
+        let Entry::Stream(stream_map) = &mut entry.value else {
+            anyhow::bail!("Entry is not a stream");
+        };
         let mut output = vec![];
-        for (stream_id, data) in stream_map.range((Bound::Excluded(lower_bound), Bound::Unbounded))
-        {
+        for (stream_id, data) in stream_map.range((lower_bound, upper_bound)) {
             let values: Vec<Frame> = data
                 .iter()
                 .map(|(k, v)| [k, v])

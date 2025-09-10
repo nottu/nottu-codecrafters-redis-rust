@@ -5,7 +5,7 @@ use tokio::{
     time::Instant,
 };
 
-use crate::{commands::SetArgs, connection::Connection, db::Db, resp::Frame};
+use crate::{commands::SetArgs, connection::Connection, db::Db};
 
 mod commands;
 mod connection;
@@ -156,11 +156,7 @@ async fn process_connection(stream: TcpStream, cache: Db) -> anyhow::Result<()> 
                     return Ok(());
                 }
                 let data = cache.x_read(key.clone(), lower_bound).await?;
-                connection
-                    .write_frame(Frame::Array(
-                        [Frame::Array([Frame::buld_from_string(key), data].to_vec())].to_vec(),
-                    ))
-                    .await?;
+                connection.write_frame(data).await?;
             }
         }
         connection.flush().await?;
