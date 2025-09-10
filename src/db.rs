@@ -445,6 +445,49 @@ impl Db {
         }
         Ok(Frame::Array(output))
     }
+    pub async fn x_read(&self, key: String, lower_bound: String) -> anyhow::Result<Frame> {
+        let mut locked_cache = self.data.lock().await;
+
+        let entry = locked_cache.entry(key).or_insert(CacheEntry {
+            value: Entry::Stream(BTreeMap::new()),
+            expire_at: None,
+        });
+        let Entry::Stream(stream_map) = &mut entry.value else {
+            anyhow::bail!("Entry is not a stream");
+        };
+        let lower_bound: StreamId = {
+            if lower_bound == "-" {
+                "0-1".to_string()
+            } else if lower_bound.contains("-") {
+                lower_bound
+            } else {
+                format!("{lower_bound}-0")
+            }
+        }
+        .try_into()
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+        eprintln!("Getting values in starting from: {lower_bound:?}");
+
+        let mut output = vec![];
+        for (stream_id, data) in stream_map.range((Bound::Excluded(lower_bound), Bound::Unbounded))
+        {
+            let values: Vec<Frame> = data
+                .iter()
+                .map(|(k, v)| [k, v])
+                .flatten()
+                .map(|s| Frame::bulk_from_str(s))
+                .collect();
+            output.push(Frame::Array(
+                [
+                    Frame::buld_from_string(stream_id.to_string()),
+                    Frame::Array(values),
+                ]
+                .to_vec(),
+            ));
+        }
+        Ok(Frame::Array(output))
+    }
     /// Gets next entry_id and validates it.
     /// stream id are always composed of two integers: `<millisecondsTime>`-`<sequenceNumber>`
     /// Entry IDs are unique within a stream, and they're guaranteed to be incremental

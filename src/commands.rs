@@ -69,6 +69,12 @@ pub enum Command {
         lower_bound: String,
         upper_bound: String,
     },
+    #[command(alias = "XREAD")]
+    Xread {
+        streams: String,
+        key: String,
+        lower_bound: String,
+    },
     Close,
 }
 

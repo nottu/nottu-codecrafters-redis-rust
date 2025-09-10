@@ -5,7 +5,7 @@ use tokio::{
     time::Instant,
 };
 
-use crate::{commands::SetArgs, connection::Connection, db::Db};
+use crate::{commands::SetArgs, connection::Connection, db::Db, resp::Frame};
 
 mod commands;
 mod connection;
@@ -143,6 +143,24 @@ async fn process_connection(stream: TcpStream, cache: Db) -> anyhow::Result<()> 
             } => {
                 let data = cache.x_range(key, lower_bound, upper_bound).await?;
                 connection.write_frame(data).await?;
+            }
+            commands::Command::Xread {
+                streams,
+                key,
+                lower_bound,
+            } => {
+                if streams != "streams" {
+                    connection
+                        .write_simple_err(&format!("Expected streams keyword, found {streams}"))
+                        .await?;
+                    return Ok(());
+                }
+                let data = cache.x_read(key.clone(), lower_bound).await?;
+                connection
+                    .write_frame(Frame::Array(
+                        [Frame::Array([Frame::buld_from_string(key), data].to_vec())].to_vec(),
+                    ))
+                    .await?;
             }
         }
         connection.flush().await?;
