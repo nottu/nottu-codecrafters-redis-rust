@@ -6,7 +6,7 @@ use tokio::{
 
 use crate::{
     commands::{Command, RedisCli},
-    resp::RESP,
+    resp::Frame,
 };
 
 pub struct Connection {
@@ -33,15 +33,15 @@ impl Connection {
 
         let data = str::from_utf8(&self.buf[..bytes_read])?;
         dbg!(data);
-        let data = RESP::try_parse(data)?;
-        let RESP::Array(command_args) = data else {
+        let data = Frame::try_parse(data)?;
+        let Frame::Array(command_args) = data else {
             return Err(anyhow::anyhow!(
                 "expected an array with command and arguments, got {data:?}"
             ));
         };
         let parsed_commands = RedisCli::try_parse_from(
             // clap wants the first arg to be the program name... we pre-pend a value to comply
-            std::iter::once(RESP::SimpleString("redis-cli".to_string())).chain(command_args),
+            std::iter::once(Frame::SimpleString("redis-cli".to_string())).chain(command_args),
         )?;
         Ok(parsed_commands.command)
     }
@@ -96,6 +96,11 @@ impl Connection {
         self.stream.write_all(b"-").await?;
         self.stream.write_all(err.as_bytes()).await?;
         self.stream.write_all(b"\r\n").await?;
+        Ok(())
+    }
+    pub async fn write_frame(&mut self, frame: Frame) -> anyhow::Result<()> {
+        // TODO avoid creating a new String...
+        self.stream.write_all(&frame.to_string().as_bytes()).await?;
         Ok(())
     }
     pub async fn flush(&mut self) -> anyhow::Result<()> {

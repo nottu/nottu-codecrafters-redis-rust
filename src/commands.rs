@@ -63,6 +63,12 @@ pub enum Command {
         #[arg(required = true)]
         data: Vec<String>,
     },
+    #[command(alias = "XRANGE")]
+    Xrange {
+        key: String,
+        lower_bound: String,
+        upper_bound: String,
+    },
     Close,
 }
 
@@ -88,7 +94,7 @@ mod command_test {
 
     use crate::{
         commands::{Command, Expiry, RedisCli},
-        resp::RESP,
+        resp::Frame,
     };
 
     #[test]
@@ -123,10 +129,10 @@ mod command_test {
     #[test]
     fn test_parse_from_resp() {
         let args = vec![
-            RESP::SimpleString("redis-cli".to_string()),
-            RESP::SimpleString("SET".to_string()),
-            RESP::SimpleString("banana".to_string()),
-            RESP::SimpleString("orange".to_string()),
+            Frame::SimpleString("redis-cli".to_string()),
+            Frame::SimpleString("SET".to_string()),
+            Frame::SimpleString("banana".to_string()),
+            Frame::SimpleString("orange".to_string()),
         ];
 
         let set_cmd = RedisCli::parse_from(args);

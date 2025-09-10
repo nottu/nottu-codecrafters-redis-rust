@@ -1,15 +1,15 @@
-use std::{collections::VecDeque, ffi::OsString, os::unix::ffi::OsStringExt};
+use std::{ffi::OsString, os::unix::ffi::OsStringExt};
 
 #[derive(Debug, PartialEq, Eq, Clone)]
-pub enum RESP {
+pub enum Frame {
     Int(i64),
     SimpleString(String),
     Error(String),
     Bulk(Vec<u8>),
-    Array(VecDeque<RESP>),
+    Array(Vec<Frame>),
 }
 
-impl RESP {
+impl Frame {
     pub const NULL_BULK: &'static str = "$-1\r\n";
 
     pub fn try_parse(s: &str) -> anyhow::Result<Self> {
@@ -25,14 +25,14 @@ impl RESP {
                     .find("\r\n")
                     .ok_or(anyhow::anyhow!("No CRLF termination found"))?;
                 let val: i64 = val[..break_idx].parse()?;
-                (RESP::Int(val), break_idx + 2 + 1)
+                (Frame::Int(val), break_idx + 2 + 1)
             }
             "+" => {
                 let break_idx = val
                     .find("\r\n")
                     .ok_or(anyhow::anyhow!("No CRLF termination found"))?;
                 (
-                    RESP::SimpleString(val[..break_idx].to_string()),
+                    Frame::SimpleString(val[..break_idx].to_string()),
                     break_idx + 2 + 1,
                 )
             }
@@ -40,7 +40,10 @@ impl RESP {
                 let break_idx = val
                     .find("\r\n")
                     .ok_or(anyhow::anyhow!("No CRLF termination found"))?;
-                (RESP::Error(val[..break_idx].to_string()), break_idx + 2 + 1)
+                (
+                    Frame::Error(val[..break_idx].to_string()),
+                    break_idx + 2 + 1,
+                )
             }
             // bulk string
             "$" => {
@@ -50,7 +53,7 @@ impl RESP {
                 let len: usize = val[..break_idx].parse()?;
                 let remaining = &val[(2 + break_idx)..];
                 let bulk_bytes = remaining[..len].as_bytes();
-                (RESP::Bulk(bulk_bytes.to_vec()), len + break_idx + 4 + 1)
+                (Frame::Bulk(bulk_bytes.to_vec()), len + break_idx + 4 + 1)
             }
             // array
             "*" => {
@@ -58,14 +61,14 @@ impl RESP {
                     .find("\r\n")
                     .ok_or(anyhow::anyhow!("No CRLF termination found"))?;
                 let len: usize = val[..break_idx].parse()?;
-                let mut vals = VecDeque::with_capacity(len);
+                let mut vals = Vec::with_capacity(len);
                 let mut offset = 2 + break_idx;
                 for _ in 0..len {
                     let (v, bytes_read) = Self::recursive_parse(&val[offset..])?;
-                    vals.push_back(v);
+                    vals.push(v);
                     offset += bytes_read;
                 }
-                (RESP::Array(vals), offset + 1)
+                (Frame::Array(vals), offset + 1)
             }
             _ => return Err(anyhow::anyhow!("Unknown type {resp_type:?}")),
         };
@@ -98,14 +101,20 @@ impl RESP {
             }
         }
     }
+    pub fn buld_from_string(s: String) -> Self {
+        Self::Bulk(s.into_bytes())
+    }
+    pub fn bulk_from_str(s: &str) -> Self {
+        Self::buld_from_string(s.to_string())
+    }
 }
 
-impl From<RESP> for OsString {
-    fn from(value: RESP) -> Self {
+impl From<Frame> for OsString {
+    fn from(value: Frame) -> Self {
         match value {
-            RESP::SimpleString(v) => v.into(),
+            Frame::SimpleString(v) => v.into(),
             // TODO: This is *nix specific code, maybe generalize to allow for Windows
-            RESP::Bulk(bytes) => OsString::from_vec(bytes),
+            Frame::Bulk(bytes) => OsString::from_vec(bytes),
             _ => value.to_string().into(),
         }
     }
@@ -113,35 +122,35 @@ impl From<RESP> for OsString {
 
 #[cfg(test)]
 mod test_resp {
-    use crate::resp::RESP;
+    use crate::resp::Frame;
 
     #[test]
     fn parse_int() {
         let val = ":1000\r\n";
-        let resp = RESP::try_parse(&val).expect("Expected to parse valid RESP string");
-        assert_eq!(resp, RESP::Int(1000));
+        let resp = Frame::try_parse(&val).expect("Expected to parse valid RESP string");
+        assert_eq!(resp, Frame::Int(1000));
 
         let val = ":+1000\r\n";
-        let resp = RESP::try_parse(&val).expect("Expected to parse valid RESP string");
-        assert_eq!(resp, RESP::Int(1000));
+        let resp = Frame::try_parse(&val).expect("Expected to parse valid RESP string");
+        assert_eq!(resp, Frame::Int(1000));
 
         let val = ":-1000\r\n";
-        let resp = RESP::try_parse(&val).expect("Expected to parse valid RESP string");
-        assert_eq!(resp, RESP::Int(-1000));
+        let resp = Frame::try_parse(&val).expect("Expected to parse valid RESP string");
+        assert_eq!(resp, Frame::Int(-1000));
 
         // Test to string
-        let resp_str = RESP::Int(1000).to_string();
+        let resp_str = Frame::Int(1000).to_string();
         assert_eq!(":1000\r\n", resp_str);
 
-        let resp_str = RESP::Int(-1000).to_string();
+        let resp_str = Frame::Int(-1000).to_string();
         assert_eq!(":-1000\r\n", resp_str);
     }
 
     #[test]
     fn parse_simple_string() {
         let val = "+OK\r\n";
-        let resp = RESP::try_parse(&val).expect("Expected to parse valid RESP string");
-        assert_eq!(resp, RESP::SimpleString("OK".to_string()));
+        let resp = Frame::try_parse(&val).expect("Expected to parse valid RESP string");
+        assert_eq!(resp, Frame::SimpleString("OK".to_string()));
 
         assert_eq!(val, resp.to_string());
     }
@@ -149,14 +158,14 @@ mod test_resp {
     #[test]
     fn parse_bulk_string() {
         let val = "$6\r\nhe\rllo\r\n";
-        let resp = RESP::try_parse(&val).expect("Expected to parse valid RESP string");
-        assert_eq!(resp, RESP::Bulk("he\rllo".as_bytes().to_vec()));
+        let resp = Frame::try_parse(&val).expect("Expected to parse valid RESP string");
+        assert_eq!(resp, Frame::Bulk("he\rllo".as_bytes().to_vec()));
         assert_eq!(val, resp.to_string());
 
         // test empty string
         let val = "$0\r\n\r\n";
-        let resp = RESP::try_parse(&val).expect("Expected to parse valid RESP string");
-        assert_eq!(resp, RESP::Bulk("".as_bytes().to_vec()));
+        let resp = Frame::try_parse(&val).expect("Expected to parse valid RESP string");
+        assert_eq!(resp, Frame::Bulk("".as_bytes().to_vec()));
 
         // nil string?
     }
@@ -164,30 +173,30 @@ mod test_resp {
     #[test]
     fn parse_array() {
         let val = "*3\r\n+OK\r\n$5\r\nhello\r\n$5\r\nworld\r\n";
-        let resp = RESP::try_parse(&val).expect("Expected to parse valid RESP string");
+        let resp = Frame::try_parse(&val).expect("Expected to parse valid RESP string");
         assert_eq!(
             resp,
-            RESP::Array(
+            Frame::Array(
                 vec![
-                    RESP::SimpleString("OK".to_string()),
-                    RESP::Bulk("hello".as_bytes().to_vec()),
-                    RESP::Bulk("world".as_bytes().to_vec()),
+                    Frame::SimpleString("OK".to_string()),
+                    Frame::Bulk("hello".as_bytes().to_vec()),
+                    Frame::Bulk("world".as_bytes().to_vec()),
                 ]
                 .into()
             )
         );
 
         let val = "*2\r\n*3\r\n:1\r\n:2\r\n:3\r\n*2\r\n+Hello\r\n-World\r\n";
-        let resp = RESP::try_parse(&val).expect("Expected to parse valid RESP string");
+        let resp = Frame::try_parse(&val).expect("Expected to parse valid RESP string");
         assert_eq!(
             resp,
-            RESP::Array(
+            Frame::Array(
                 vec![
-                    RESP::Array(vec![RESP::Int(1), RESP::Int(2), RESP::Int(3),].into()),
-                    RESP::Array(
+                    Frame::Array(vec![Frame::Int(1), Frame::Int(2), Frame::Int(3),].into()),
+                    Frame::Array(
                         vec![
-                            RESP::SimpleString("Hello".to_string()),
-                            RESP::Error("World".to_string()),
+                            Frame::SimpleString("Hello".to_string()),
+                            Frame::Error("World".to_string()),
                         ]
                         .into()
                     )

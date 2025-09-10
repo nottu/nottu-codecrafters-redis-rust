@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
+    ops::Bound,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -9,18 +10,42 @@ use tokio::{
     time::Instant,
 };
 
+use crate::resp::Frame;
+
 #[derive(Debug)]
 enum Entry {
     Data(EntryData),
     List(NotifiedList),
     // TODO: look into better options
-    Stream(BTreeMap<StreamId, HashMap<String, String>>),
+    Stream(BTreeMap<StreamId, BTreeMap<String, String>>),
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 struct StreamId {
     millisecond_time: u128,
     sequence_number: usize,
+}
+
+impl StreamId {
+    fn to_string(&self) -> String {
+        format!("{}-{}", self.millisecond_time, self.sequence_number)
+    }
+}
+
+impl TryFrom<String> for StreamId {
+    type Error = &'static str;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        let mut vals = value.split("-");
+        let millis = vals.next().ok_or("expected millis")?;
+        let seq = vals.next().ok_or("expected sequence")?;
+
+        let millisecond_time: u128 = millis.parse().map_err(|_| "failed to parse millis")?;
+        let sequence_number: usize = seq.parse().map_err(|_| "failed to parse sequence")?;
+        Ok(Self {
+            millisecond_time,
+            sequence_number,
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -341,7 +366,7 @@ impl Db {
         let prev_entry_id = stream_map.last_key_value().map(|(k, _v)| k);
         let entry_id = Self::get_next_stream_entry_id(&stream_id, prev_entry_id)?;
 
-        let stream_entry = stream_map.entry(entry_id).or_insert(HashMap::new());
+        let stream_entry = stream_map.entry(entry_id).or_insert(BTreeMap::new());
         for (field, value) in field_values.chunks_exact(2).map(|c| (&c[0], &c[1])) {
             let _ = stream_entry.insert(field.clone(), value.clone());
         }
@@ -349,6 +374,72 @@ impl Db {
             "{}-{}",
             entry_id.millisecond_time, entry_id.sequence_number
         ))
+    }
+    /// On top of the `key` for the stream. It takes two arguments: `start` and `end`. Both are entry IDs.
+    ///
+    /// The command returns all entries in the stream with IDs between the start and end IDs.
+    /// This range is "inclusive", which means that the response will includes entries with IDs that are equal
+    /// to the start and end IDs.
+    ///
+    /// The sequence number doesn't need to be included in the start and end IDs provided to the command.
+    /// If not provided, `XRANGE` defaults to a sequence number of 0 for the start and the maximum sequence
+    /// number for the end.
+    pub async fn x_range(
+        &self,
+        key: String,
+        lower_bound: String,
+        upper_bound: String,
+    ) -> anyhow::Result<Frame> {
+        let mut locked_cache = self.data.lock().await;
+
+        let entry = locked_cache.entry(key).or_insert(CacheEntry {
+            value: Entry::Stream(BTreeMap::new()),
+            expire_at: None,
+        });
+        let Entry::Stream(stream_map) = &mut entry.value else {
+            anyhow::bail!("Entry is not a stream");
+        };
+        let lower_bound: StreamId = {
+            if lower_bound.contains("-") {
+                lower_bound
+            } else {
+                format!("{lower_bound}-0")
+            }
+        }
+        .try_into()
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+        let upper_bound: StreamId = {
+            if upper_bound.contains("-") {
+                upper_bound
+            } else {
+                format!("{upper_bound}-{}", usize::MAX)
+            }
+        }
+        .try_into()
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+        eprintln!("Getting values in range {lower_bound:?}, {upper_bound:?}");
+
+        let mut output = vec![];
+        for (stream_id, data) in
+            stream_map.range((Bound::Included(lower_bound), Bound::Included(upper_bound)))
+        {
+            let values: Vec<Frame> = data
+                .iter()
+                .map(|(k, v)| [k, v])
+                .flatten()
+                .map(|s| Frame::bulk_from_str(s))
+                .collect();
+            output.push(Frame::Array(
+                [
+                    Frame::buld_from_string(stream_id.to_string()),
+                    Frame::Array(values),
+                ]
+                .to_vec(),
+            ));
+        }
+        Ok(Frame::Array(output))
     }
     /// Gets next entry_id and validates it.
     /// stream id are always composed of two integers: `<millisecondsTime>`-`<sequenceNumber>`
@@ -387,7 +478,10 @@ impl Db {
 
         let sequence_number = match seq_part {
             Some("*") | None => match prev_entry_id {
-                Some(prev) if prev.millisecond_time == millisecond_time => prev.sequence_number + 1,
+                Some(prev) if prev.millisecond_time == millisecond_time => {
+                    // TODO: should this return an error? too may sequences?
+                    prev.sequence_number.saturating_add(1)
+                }
                 _ => {
                     if millisecond_time == 0 {
                         1
@@ -586,5 +680,40 @@ mod db_tests {
             )
             .await;
         assert!(add_res.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_x_range() {
+        let db = Db::new();
+        let _ = db
+            .x_add(
+                "mango".to_string(),
+                "1-1".to_string(),
+                &["r".to_string(), "s".to_string()],
+            )
+            .await;
+        let _ = db
+            .x_add(
+                "mango".to_string(),
+                "2-1".to_string(),
+                &["r".to_string(), "s".to_string()],
+            )
+            .await;
+        let _ = db
+            .x_add(
+                "mango".to_string(),
+                "3-1".to_string(),
+                &["r".to_string(), "s".to_string()],
+            )
+            .await;
+
+        let x_range_res = db
+            .x_range("mango".to_string(), "1".to_string(), "2".to_string())
+            .await;
+        assert!(x_range_res.is_ok());
+        let x_range_res = db
+            .x_range("mango".to_string(), "1-0".to_string(), "2-1".to_string())
+            .await;
+        assert!(x_range_res.is_ok())
     }
 }

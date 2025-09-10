@@ -136,6 +136,14 @@ async fn process_connection(stream: TcpStream, cache: Db) -> anyhow::Result<()> 
                 Ok(stream_id) => connection.write_bytes(stream_id.as_bytes()).await?,
                 Err(err) => connection.write_simple_err(&err.to_string()).await?,
             },
+            commands::Command::Xrange {
+                key,
+                lower_bound,
+                upper_bound,
+            } => {
+                let data = cache.x_range(key, lower_bound, upper_bound).await?;
+                connection.write_frame(data).await?;
+            }
         }
         connection.flush().await?;
     }
