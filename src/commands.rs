@@ -72,8 +72,7 @@ pub enum Command {
     #[command(alias = "XREAD")]
     Xread {
         streams: String,
-        key: String,
-        lower_bound: String,
+        args: Vec<String>,
     },
     Close,
 }

@@ -422,6 +422,7 @@ impl Db {
         .await
     }
     pub async fn x_read(&self, key: String, lower_bound: String) -> anyhow::Result<Frame> {
+        eprintln!("[x_read] key: {key}, lower_bound: {lower_bound}");
         let lower_bound: StreamId = {
             if lower_bound == "-" {
                 "0-1".to_string()
@@ -432,14 +433,14 @@ impl Db {
             }
         }
         .try_into()
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+        .map_err(|e| anyhow::anyhow!("failed parsing lower_boud with {e}"))?;
 
         let stream_data = self
             .read_stream(key.clone(), Bound::Excluded(lower_bound), Bound::Unbounded)
             .await?;
         let stream_data = Frame::Array([Frame::buld_from_string(key), stream_data].to_vec());
 
-        Ok(Frame::Array([stream_data].to_vec()))
+        Ok(stream_data)
     }
 
     async fn read_stream(
