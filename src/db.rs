@@ -400,7 +400,9 @@ impl Db {
             anyhow::bail!("Entry is not a stream");
         };
         let lower_bound: StreamId = {
-            if lower_bound.contains("-") {
+            if lower_bound == "-" {
+                "0-1".to_string()
+            } else if lower_bound.contains("-") {
                 lower_bound
             } else {
                 format!("{lower_bound}-0")
@@ -688,14 +690,14 @@ mod db_tests {
         let _ = db
             .x_add(
                 "mango".to_string(),
-                "1-1".to_string(),
+                "0-1".to_string(),
                 &["r".to_string(), "s".to_string()],
             )
             .await;
         let _ = db
             .x_add(
                 "mango".to_string(),
-                "2-1".to_string(),
+                "0-2".to_string(),
                 &["r".to_string(), "s".to_string()],
             )
             .await;
@@ -708,11 +710,17 @@ mod db_tests {
             .await;
 
         let x_range_res = db
-            .x_range("mango".to_string(), "1".to_string(), "2".to_string())
+            .x_range("mango".to_string(), "0".to_string(), "2".to_string())
             .await;
         assert!(x_range_res.is_ok());
+
         let x_range_res = db
-            .x_range("mango".to_string(), "1-0".to_string(), "2-1".to_string())
+            .x_range("mango".to_string(), "0-1".to_string(), "2-1".to_string())
+            .await;
+        assert!(x_range_res.is_ok());
+
+        let x_range_res = db
+            .x_range("mango".to_string(), "-".to_string(), "2-1".to_string())
             .await;
         assert!(x_range_res.is_ok())
     }
