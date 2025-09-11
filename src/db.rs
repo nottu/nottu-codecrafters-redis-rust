@@ -15,9 +15,132 @@ use crate::resp::Frame;
 #[derive(Debug)]
 enum Entry {
     Data(ExpireableData),
+    // TODO: Abstract away notify logic...
     List(NotifiedList),
-    // TODO: look into better options
-    Stream(BTreeMap<StreamId, BTreeMap<String, String>>),
+    Stream(NotifyStream),
+}
+
+#[derive(Debug, Default)]
+struct NotifyStream {
+    // TODO: look into better options, does the stream data need to be easily searchable?
+    // Could we replace the inner BTreeMap with a Vec<(string, string)>
+    data: BTreeMap<StreamId, BTreeMap<String, String>>,
+    waiters: VecDeque<oneshot::Sender<()>>,
+}
+
+impl NotifyStream {
+    fn new() -> Self {
+        Self {
+            data: BTreeMap::new(),
+            waiters: VecDeque::new(),
+        }
+    }
+
+    fn add_waiter(&mut self) -> oneshot::Receiver<()> {
+        let (tx, rx) = oneshot::channel();
+        self.waiters.push_back(tx);
+        rx
+    }
+
+    fn notify_one(&mut self) -> bool {
+        while let Some(waiter) = self.waiters.pop_front() {
+            if waiter.send(()).is_ok() {
+                return true;
+            }
+            // If sending failed, receiver dropped; try the next one
+        }
+        return false;
+    }
+
+    fn notify_n(&mut self, num_notifications: usize) {
+        for _ in 0..num_notifications {
+            if !self.notify_one() {
+                // No one left to notify
+                break;
+            }
+        }
+    }
+
+    fn add(&mut self, entry_id: String, field_values: &[String]) -> anyhow::Result<String> {
+        let entry_id = self.get_next_stream_entry_id(entry_id)?;
+
+        let entry = self.data.entry(entry_id).or_insert(BTreeMap::default());
+        let num_notifications = field_values.len() / 2;
+        for (field, value) in field_values.chunks_exact(2).map(|c| (&c[0], &c[1])) {
+            // should never have a value...since we check during get_next_stream_entry_id
+            let _ = entry.insert(field.clone(), value.clone());
+        }
+        self.notify_n(num_notifications);
+        Ok(entry_id.to_string())
+    }
+
+    /// Gets next entry_id and validates it.
+    /// stream id are always composed of two integers: `<millisecondsTime>`-`<sequenceNumber>`
+    /// Entry IDs are unique within a stream, and they're guaranteed to be incremental
+    fn get_next_stream_entry_id(&self, entry_id: String) -> anyhow::Result<StreamId> {
+        let prev_entry_id = self.data.last_key_value().map(|(k, _v)| k);
+        if entry_id == "0-0" {
+            anyhow::bail!("ERR The ID specified in XADD must be greater than 0-0");
+        }
+
+        let mut id_parts = entry_id.splitn(2, "-");
+
+        let millis_part = id_parts
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("ERR invalid stream ID format: missing millis"))?;
+        let seq_part = id_parts.next();
+
+        let millisecond_time = match millis_part {
+            "*" => SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("expected future time")
+                .as_millis(),
+            _ => millis_part
+                .parse::<u128>()
+                .map_err(|_| anyhow::anyhow!("ERR invalid millisecond timestamp in stream ID"))?,
+        };
+
+        if let Some(prev_entry_id) = prev_entry_id {
+            if prev_entry_id.millisecond_time > millisecond_time {
+                eprintln!("matching prev ids?");
+                anyhow::bail!("ERR The ID specified in XADD is equal or smaller than the target stream top item");
+            }
+        }
+
+        let sequence_number = match seq_part {
+            Some("*") | None => match prev_entry_id {
+                Some(prev) if prev.millisecond_time == millisecond_time => {
+                    // TODO: should this return an error? too may sequences?
+                    prev.sequence_number.saturating_add(1)
+                }
+                _ => {
+                    if millisecond_time == 0 {
+                        1
+                    } else {
+                        0
+                    }
+                }
+            },
+            Some(seq) => seq
+                .parse::<usize>()
+                .map_err(|_| anyhow::anyhow!("ERR invalid sequence number in stream ID"))?,
+        };
+
+        let new_entry_id = StreamId {
+            millisecond_time,
+            sequence_number,
+        };
+
+        if let Some(prev) = prev_entry_id {
+            if new_entry_id <= *prev {
+                anyhow::bail!(
+                    "ERR The ID specified in XADD is equal or smaller than the target stream top item"
+                );
+            }
+        }
+
+        Ok(new_entry_id)
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
@@ -334,8 +457,8 @@ impl Db {
 
     pub async fn x_add(
         &self,
-        key: String,
-        stream_id: String,
+        stream_key: String,
+        stream_entry_id: String,
         field_values: &[String],
     ) -> anyhow::Result<String> {
         if field_values.len() % 2 != 0 {
@@ -344,23 +467,13 @@ impl Db {
         let mut locked_cache = self.data.lock().await;
 
         let stream_entry = locked_cache
-            .entry(key)
-            .or_insert(Entry::Stream(BTreeMap::new()));
-        let Entry::Stream(stream_map) = stream_entry else {
+            .entry(stream_key)
+            .or_insert(Entry::Stream(NotifyStream::new()));
+        let Entry::Stream(notify_stream) = stream_entry else {
             anyhow::bail!("Entry is not a stream");
         };
 
-        let prev_entry_id = stream_map.last_key_value().map(|(k, _v)| k);
-        let entry_id = Self::get_next_stream_entry_id(&stream_id, prev_entry_id)?;
-
-        let stream_entry = stream_map.entry(entry_id).or_insert(BTreeMap::new());
-        for (field, value) in field_values.chunks_exact(2).map(|c| (&c[0], &c[1])) {
-            let _ = stream_entry.insert(field.clone(), value.clone());
-        }
-        Ok(format!(
-            "{}-{}",
-            entry_id.millisecond_time, entry_id.sequence_number
-        ))
+        notify_stream.add(stream_entry_id, field_values)
     }
     /// On top of the `key` for the stream. It takes two arguments: `start` and `end`. Both are entry IDs.
     ///
@@ -440,14 +553,15 @@ impl Db {
 
         let entry = locked_cache
             .entry(key)
-            .or_insert(Entry::Stream(BTreeMap::new()));
+            .or_insert(Entry::Stream(NotifyStream::new()));
 
         let Entry::Stream(stream_map) = entry else {
             anyhow::bail!("Entry is not a stream");
         };
 
+        // Should some of this be moved to NotifyStream?
         let mut output = vec![];
-        for (stream_id, data) in stream_map.range((lower_bound, upper_bound)) {
+        for (stream_id, data) in stream_map.data.range((lower_bound, upper_bound)) {
             let values: Vec<Frame> = data
                 .iter()
                 .map(|(k, v)| [k, v])
@@ -463,75 +577,6 @@ impl Db {
             ));
         }
         Ok(Frame::Array(output))
-    }
-    /// Gets next entry_id and validates it.
-    /// stream id are always composed of two integers: `<millisecondsTime>`-`<sequenceNumber>`
-    /// Entry IDs are unique within a stream, and they're guaranteed to be incremental
-    fn get_next_stream_entry_id(
-        entry_id: &str,
-        prev_entry_id: Option<&StreamId>,
-    ) -> anyhow::Result<StreamId> {
-        if entry_id == "0-0" {
-            anyhow::bail!("ERR The ID specified in XADD must be greater than 0-0");
-        }
-
-        let mut id_parts = entry_id.splitn(2, "-");
-
-        let millis_part = id_parts
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("ERR invalid stream ID format: missing millis"))?;
-        let seq_part = id_parts.next();
-
-        let millisecond_time = match millis_part {
-            "*" => SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("expected future time")
-                .as_millis(),
-            _ => millis_part
-                .parse::<u128>()
-                .map_err(|_| anyhow::anyhow!("ERR invalid millisecond timestamp in stream ID"))?,
-        };
-
-        if let Some(prev_entry_id) = prev_entry_id {
-            if prev_entry_id.millisecond_time > millisecond_time {
-                eprintln!("matching prev ids?");
-                anyhow::bail!("ERR The ID specified in XADD is equal or smaller than the target stream top item");
-            }
-        }
-
-        let sequence_number = match seq_part {
-            Some("*") | None => match prev_entry_id {
-                Some(prev) if prev.millisecond_time == millisecond_time => {
-                    // TODO: should this return an error? too may sequences?
-                    prev.sequence_number.saturating_add(1)
-                }
-                _ => {
-                    if millisecond_time == 0 {
-                        1
-                    } else {
-                        0
-                    }
-                }
-            },
-            Some(seq) => seq
-                .parse::<usize>()
-                .map_err(|_| anyhow::anyhow!("ERR invalid sequence number in stream ID"))?,
-        };
-
-        let new_entry_id = StreamId {
-            millisecond_time,
-            sequence_number,
-        };
-
-        if let Some(prev) = prev_entry_id {
-            if new_entry_id <= *prev {
-                anyhow::bail!(
-                    "ERR The ID specified in XADD is equal or smaller than the target stream top item"
-                );
-            }
-        }
-
-        Ok(new_entry_id)
     }
 }
 
