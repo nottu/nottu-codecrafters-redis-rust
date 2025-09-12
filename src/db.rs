@@ -600,12 +600,16 @@ impl Db {
             let waiter = stream_map.add_waiter();
             drop(locked_cache);
             if let Some(millis) = block {
-                match tokio::time::timeout(Duration::from_millis(millis), waiter).await {
-                    Ok(_) => (),
-                    Err(e) => {
-                        eprintln!("Timed out: {e:?}");
-                        // only send null array when using block?
-                        return Ok(Frame::NullArray);
+                if millis == 0 {
+                    waiter.await?;
+                } else {
+                    match tokio::time::timeout(Duration::from_millis(millis), waiter).await {
+                        Ok(_) => (),
+                        Err(e) => {
+                            eprintln!("Timed out: {e:?}");
+                            // only send null array when using block?
+                            return Ok(Frame::NullArray);
+                        }
                     }
                 }
             } else {
