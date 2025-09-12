@@ -25,14 +25,18 @@ struct NotifyStream {
     // TODO: look into better options, does the stream data need to be easily searchable?
     // Could we replace the inner BTreeMap with a Vec<(string, string)>
     data: BTreeMap<StreamId, BTreeMap<String, String>>,
+    // TODO: can be changed to a Notify
     waiters: VecDeque<oneshot::Sender<()>>,
+    // notify: Notify,
 }
 
+//
 impl NotifyStream {
     fn new() -> Self {
         Self {
             data: BTreeMap::new(),
             waiters: VecDeque::new(),
+            // notify: Notify::new(),
         }
     }
 
@@ -42,22 +46,9 @@ impl NotifyStream {
         rx
     }
 
-    fn notify_one(&mut self) -> bool {
+    fn notify_all(&mut self) {
         while let Some(waiter) = self.waiters.pop_front() {
-            if waiter.send(()).is_ok() {
-                return true;
-            }
-            // If sending failed, receiver dropped; try the next one
-        }
-        return false;
-    }
-
-    fn notify_n(&mut self, num_notifications: usize) {
-        for _ in 0..num_notifications {
-            if !self.notify_one() {
-                // No one left to notify
-                break;
-            }
+            let _ = waiter.send(());
         }
     }
 
@@ -65,12 +56,11 @@ impl NotifyStream {
         let entry_id = self.get_next_stream_entry_id(entry_id)?;
 
         let entry = self.data.entry(entry_id).or_insert(BTreeMap::default());
-        let num_notifications = field_values.len() / 2;
         for (field, value) in field_values.chunks_exact(2).map(|c| (&c[0], &c[1])) {
             // should never have a value...since we check during get_next_stream_entry_id
             let _ = entry.insert(field.clone(), value.clone());
         }
-        self.notify_n(num_notifications);
+        self.notify_all();
         Ok(entry_id.to_string())
     }
 
@@ -530,16 +520,20 @@ impl Db {
     ) -> anyhow::Result<Frame> {
         eprintln!("[x_read] key: {key}, lower_bound: {lower_bound}");
         let lower_bound: StreamId = {
-            if lower_bound == "-" {
-                "0-1".to_string()
+            if lower_bound == "$" {
+                self.get_last_stream_entry(key.clone()).await?
+            } else if lower_bound == "-" {
+                "0-1".to_string().try_into().unwrap()
             } else if lower_bound.contains("-") {
                 lower_bound
+                    .try_into()
+                    .map_err(|e| anyhow::anyhow!("failed parsing lower_boud with {e}"))?
             } else {
                 format!("{lower_bound}-0")
+                    .try_into()
+                    .map_err(|e| anyhow::anyhow!("failed parsing lower_boud with {e}"))?
             }
-        }
-        .try_into()
-        .map_err(|e| anyhow::anyhow!("failed parsing lower_boud with {e}"))?;
+        };
 
         let stream_data = self
             .read_stream(
@@ -558,6 +552,24 @@ impl Db {
         }
     }
 
+    async fn get_last_stream_entry(&self, key: String) -> anyhow::Result<StreamId> {
+        let mut locked_cache = self.data.lock().await;
+
+        let stream_entry = locked_cache
+            .entry(key.clone())
+            .or_insert(Entry::Stream(NotifyStream::new()));
+        let Entry::Stream(notify_stream) = stream_entry else {
+            anyhow::bail!("Entry is not a stream");
+        };
+        let stream_id = notify_stream
+            .data
+            .last_key_value()
+            .map(|(k, _v)| k.clone())
+            // 0-0 is an invalid StreamId, but it's fine here
+            .unwrap_or("0-0".to_string().try_into().unwrap());
+        Ok(stream_id)
+    }
+
     async fn read_stream(
         &self,
         block: Option<u64>,
@@ -565,6 +577,7 @@ impl Db {
         lower_bound: Bound<StreamId>,
         upper_bound: Bound<StreamId>,
     ) -> anyhow::Result<Frame> {
+        eprintln!("Reading Stream from: {lower_bound:?}, to: {upper_bound:?}");
         loop {
             let mut locked_cache = self.data.lock().await;
             let entry = {
@@ -601,7 +614,9 @@ impl Db {
             drop(locked_cache);
             if let Some(millis) = block {
                 if millis == 0 {
+                    eprintln!("waiting until notified");
                     waiter.await?;
+                    eprintln!("notified!")
                 } else {
                     match tokio::time::timeout(Duration::from_millis(millis), waiter).await {
                         Ok(_) => (),

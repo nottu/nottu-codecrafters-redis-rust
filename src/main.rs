@@ -149,6 +149,8 @@ async fn process_connection(stream: TcpStream, cache: Db) -> anyhow::Result<()> 
                 // this could get big... might not be ideal to hold in memory
                 let mut streams_data = Vec::with_capacity(x_read.keys.len());
                 let block = x_read.block;
+                // TODO: How should we handle multiple blocking xread?
+                // Can/Should we send this async?
                 for (key, lower_bound) in x_read.keys.into_iter().zip(x_read.streams) {
                     let data = cache.x_read(block, key, lower_bound).await?;
                     if let Frame::NullArray = data {
