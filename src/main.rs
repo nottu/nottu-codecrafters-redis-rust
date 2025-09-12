@@ -5,7 +5,12 @@ use tokio::{
     time::Instant,
 };
 
-use crate::{commands::SetArgs, connection::Connection, db::Db, resp::Frame};
+use crate::{
+    commands::{parse_xread, SetArgs},
+    connection::Connection,
+    db::Db,
+    resp::Frame,
+};
 
 mod commands;
 mod connection;
@@ -138,29 +143,24 @@ async fn process_connection(stream: TcpStream, cache: Db) -> anyhow::Result<()> 
                 let data = cache.x_range(key, lower_bound, upper_bound).await?;
                 connection.write_frame(data).await?;
             }
-            commands::Command::Xread { streams, mut args } => {
-                if streams != "streams" {
-                    connection
-                        .write_simple_err(&format!("Expected streams keyword, found {streams}"))
-                        .await?;
-                    return Ok(());
-                }
-                if args.len() % 2 != 0 {
-                    connection
-                        .write_simple_err(&format!("Expected even number of args {args:?}"))
-                        .await?;
-                    return Ok(());
-                }
-                let lower_bounds = args.split_off(args.len() / 2);
-                let entry_keys = args;
+            commands::Command::Xread { args } => {
+                let x_read = parse_xread(args)?;
 
                 // this could get big... might not be ideal to hold in memory
-                let mut streams_data = Vec::with_capacity(entry_keys.len());
-                for (key, lower_bound) in entry_keys.into_iter().zip(lower_bounds) {
-                    let data = cache.x_read(key, lower_bound).await?;
+                let mut streams_data = Vec::with_capacity(x_read.keys.len());
+                let block = x_read.block;
+                for (key, lower_bound) in x_read.keys.into_iter().zip(x_read.streams) {
+                    let data = cache.x_read(block, key, lower_bound).await?;
+                    if let Frame::NullArray = data {
+                        continue;
+                    }
                     streams_data.push(data);
                 }
-                connection.write_frame(Frame::Array(streams_data)).await?;
+                if streams_data.is_empty() {
+                    connection.write_frame(Frame::NullArray).await?;
+                } else {
+                    connection.write_frame(Frame::Array(streams_data)).await?;
+                }
             }
         }
         connection.flush().await?;

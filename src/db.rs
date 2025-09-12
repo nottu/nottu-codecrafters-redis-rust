@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, HashMap, VecDeque},
     ops::Bound,
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use tokio::{
@@ -515,13 +515,19 @@ impl Db {
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
         self.read_stream(
+            None,
             key,
             Bound::Included(lower_bound),
             Bound::Included(upper_bound),
         )
         .await
     }
-    pub async fn x_read(&self, key: String, lower_bound: String) -> anyhow::Result<Frame> {
+    pub async fn x_read(
+        &self,
+        block: Option<u64>,
+        key: String,
+        lower_bound: String,
+    ) -> anyhow::Result<Frame> {
         eprintln!("[x_read] key: {key}, lower_bound: {lower_bound}");
         let lower_bound: StreamId = {
             if lower_bound == "-" {
@@ -536,47 +542,76 @@ impl Db {
         .map_err(|e| anyhow::anyhow!("failed parsing lower_boud with {e}"))?;
 
         let stream_data = self
-            .read_stream(key.clone(), Bound::Excluded(lower_bound), Bound::Unbounded)
+            .read_stream(
+                block,
+                key.clone(),
+                Bound::Excluded(lower_bound),
+                Bound::Unbounded,
+            )
             .await?;
-        let stream_data = Frame::Array([Frame::buld_from_string(key), stream_data].to_vec());
 
-        Ok(stream_data)
+        if let Frame::NullArray = stream_data {
+            Ok(Frame::NullArray)
+        } else {
+            let stream_data = Frame::Array([Frame::buld_from_string(key), stream_data].to_vec());
+            Ok(stream_data)
+        }
     }
 
     async fn read_stream(
         &self,
+        block: Option<u64>,
         key: String,
         lower_bound: Bound<StreamId>,
         upper_bound: Bound<StreamId>,
     ) -> anyhow::Result<Frame> {
-        let mut locked_cache = self.data.lock().await;
+        loop {
+            let mut locked_cache = self.data.lock().await;
+            let entry = {
+                locked_cache
+                    .entry(key.clone())
+                    .or_insert(Entry::Stream(NotifyStream::new()))
+            };
 
-        let entry = locked_cache
-            .entry(key)
-            .or_insert(Entry::Stream(NotifyStream::new()));
+            let Entry::Stream(stream_map) = entry else {
+                anyhow::bail!("Entry is not a stream");
+            };
 
-        let Entry::Stream(stream_map) = entry else {
-            anyhow::bail!("Entry is not a stream");
-        };
-
-        // Should some of this be moved to NotifyStream?
-        let mut output = vec![];
-        for (stream_id, data) in stream_map.data.range((lower_bound, upper_bound)) {
-            let values: Vec<Frame> = data
-                .iter()
-                .map(|(k, v)| [k, v])
-                .flatten()
-                .map(|s| Frame::bulk_from_str(s))
-                .collect();
-            output.push(Frame::Array(
-                [
-                    Frame::buld_from_string(stream_id.to_string()),
-                    Frame::Array(values),
-                ]
-                .to_vec(),
-            ));
+            // Should some of this be moved to NotifyStream?
+            let mut output = vec![];
+            for (stream_id, data) in stream_map.data.range((lower_bound, upper_bound)) {
+                let values: Vec<Frame> = data
+                    .iter()
+                    .map(|(k, v)| [k, v])
+                    .flatten()
+                    .map(|s| Frame::bulk_from_str(s))
+                    .collect();
+                output.push(Frame::Array(
+                    [
+                        Frame::buld_from_string(stream_id.to_string()),
+                        Frame::Array(values),
+                    ]
+                    .to_vec(),
+                ));
+            }
+            if !output.is_empty() {
+                return Ok(Frame::Array(output));
+            }
+            let waiter = stream_map.add_waiter();
+            drop(locked_cache);
+            if let Some(millis) = block {
+                match tokio::time::timeout(Duration::from_millis(millis), waiter).await {
+                    Ok(_) => (),
+                    Err(e) => {
+                        eprintln!("Timed out: {e:?}");
+                        // only send null array when using block?
+                        return Ok(Frame::NullArray);
+                    }
+                }
+            } else {
+                return Ok(Frame::Array(vec![]));
+            }
         }
-        Ok(Frame::Array(output))
     }
 }
 

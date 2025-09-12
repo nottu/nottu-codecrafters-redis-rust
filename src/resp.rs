@@ -6,7 +6,9 @@ pub enum Frame {
     SimpleString(String),
     Error(String),
     Bulk(Vec<u8>),
+    NullBulk,
     Array(Vec<Frame>),
+    NullArray,
 }
 
 impl Frame {
@@ -99,6 +101,8 @@ impl Frame {
                     str::from_utf8(bytes).expect("expected valid bytes")
                 )
             }
+            Self::NullBulk => "$-1\r\n".to_string(),
+            Self::NullArray => "*-1\r\n".to_string(),
         }
     }
     pub fn buld_from_string(s: String) -> Self {

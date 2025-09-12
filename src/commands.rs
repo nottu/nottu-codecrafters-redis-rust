@@ -71,10 +71,49 @@ pub enum Command {
     },
     #[command(alias = "XREAD")]
     Xread {
-        streams: String,
         args: Vec<String>,
     },
     Close,
+}
+
+pub fn parse_xread(mut args: Vec<String>) -> anyhow::Result<Xread> {
+    if args.len() < 3 {
+        anyhow::bail!("Not enough args for xread {args:?}")
+    };
+    //
+    let block = if args[0] == "block" {
+        // next sould be a decimal value
+        let block_time = args[1]
+            .parse()
+            .map_err(|_e| anyhow::anyhow!("Not a valid block time"))?;
+        args = args.split_off(2);
+        Some(block_time)
+    } else {
+        None
+    };
+    if args.len() < 3 {
+        anyhow::bail!("Not enough args for xread {args:?}")
+    };
+    if args[0] != "streams" {
+        anyhow::bail!("Expected `streams` keyword");
+    }
+    args = args.split_off(1);
+    if args.len() % 2 != 0 {
+        anyhow::bail!("Expected even number of args {args:?}");
+    }
+    let lower_bounds = args.split_off(args.len() / 2);
+    let entry_keys = args;
+    Ok(Xread {
+        block,
+        keys: entry_keys,
+        streams: lower_bounds,
+    })
+}
+
+pub struct Xread {
+    pub block: Option<u64>,
+    pub keys: Vec<String>,
+    pub streams: Vec<String>,
 }
 
 #[derive(Args, Debug)]
@@ -98,7 +137,7 @@ mod command_test {
     use clap::Parser;
 
     use crate::{
-        commands::{Command, Expiry, RedisCli},
+        commands::{parse_xread, Command, Expiry, RedisCli},
         resp::Frame,
     };
 
@@ -149,5 +188,22 @@ mod command_test {
             eprint!("Command is not SET");
             assert!(false);
         }
+    }
+    #[test]
+    fn test_xread() {
+        let args = [
+            "prog", "XREAD", "block", "100", "streams", "some_key", "0-1",
+        ];
+
+        let Command::Xread { args: x_read_args } = RedisCli::parse_from(&args).command else {
+            todo!()
+        };
+        dbg!(&x_read_args);
+
+        let parsed_xread = parse_xread(x_read_args).expect("expected valid xread");
+        assert_eq!(Some(100), parsed_xread.block);
+
+        assert_eq!(vec!["some_key".to_string()], parsed_xread.keys);
+        assert_eq!(vec!["0-1".to_string()], parsed_xread.streams);
     }
 }
