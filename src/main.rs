@@ -129,6 +129,9 @@ async fn execute_atomic_command(command: Command, cache: &Db) -> anyhow::Result<
         Command::Exec => {
             unreachable!("EXEC is not an atomic command")
         }
+        Command::Discard => {
+            unreachable!("DISCARD is not an atomic command")
+        }
     };
     Ok(res_frame)
 }
@@ -176,6 +179,13 @@ async fn process_connection(stream: TcpStream, cache: Db) -> anyhow::Result<()> 
                     Frame::Array(resuls)
                 }
                 None => Frame::Error("ERR EXEC without MULTI".to_string()),
+            },
+            Command::Discard => match command_queue {
+                Some(_) => {
+                    command_queue = None;
+                    Frame::ok()
+                }
+                None => Frame::Error("ERR DISCARD without MULTI".to_string()),
             },
             commands::Command::Blpop { list_key, time_out } => {
                 let timeout = if time_out == 0.0 {

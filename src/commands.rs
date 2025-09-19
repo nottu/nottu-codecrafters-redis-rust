@@ -66,6 +66,8 @@ pub enum Command {
     Multi,
     #[command(alias = "EXEC")]
     Exec,
+    #[command(alias = "DISCARD")]
+    Discard,
 }
 
 pub fn parse_xread_args(mut args: Vec<String>) -> anyhow::Result<XreadArgs> {
