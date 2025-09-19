@@ -71,10 +71,10 @@ async fn process_connection(stream: TcpStream, cache: Db) -> anyhow::Result<()> 
                     Some(v) => connection.write_bytes(&v).await?,
                 };
             }
-            commands::Command::Incr { key } => {
-                let val = cache.increment(key).await?;
-                connection.write_int(val).await?;
-            }
+            commands::Command::Incr { key } => match cache.increment(key).await {
+                Ok(val) => connection.write_int(val).await?,
+                Err(err) => connection.write_simple_err(&err.to_string()).await?,
+            },
             commands::Command::Rpush { list_key, values } => {
                 let num_elems = cache.r_push(list_key, values).await?;
                 connection.write_int(num_elems as u64).await?;

@@ -278,6 +278,7 @@ pub struct Db {
     data: Arc<Mutex<HashMap<String, Entry>>>,
 }
 
+// TODO: Use custom error types
 impl Db {
     pub fn new() -> Self {
         Self {
@@ -329,7 +330,7 @@ impl Db {
                 expire_at: None,
             }));
         let Entry::Data(expirable_data) = entry else {
-            bail!("Entry value is not a numeric value")
+            bail!("ERR value is not an integer or out of range")
         };
 
         if expirable_data.expired() {
@@ -338,7 +339,13 @@ impl Db {
         }
 
         let str_val = str::from_utf8(&expirable_data.value)?;
-        let val: u64 = str_val.parse()?;
+        let val: u64 = str_val
+            .parse()
+            .map_err(|_| anyhow::anyhow!("ERR value is not an integer or out of range"))?;
+
+        if val == i64::MAX as u64 {
+            bail!("ERR value is not an integer or out of range")
+        }
 
         expirable_data.value = format!("{}", val + 1).into_bytes();
 
@@ -894,5 +901,12 @@ mod db_tests {
 
         let inc = db.increment("bar".to_string()).await;
         assert_eq!(Some(2), inc.ok());
+
+        // Test non valid type
+
+        db.set("baz".to_string(), "Ok".to_string(), None).await;
+
+        let inc = db.increment("baz".to_string()).await;
+        assert!(inc.is_err());
     }
 }
