@@ -322,22 +322,27 @@ impl Db {
 
     pub async fn increment(&self, key: String) -> anyhow::Result<u64> {
         let mut locked_cache = self.data.lock().await;
-        let Some(mut entry) = locked_cache.get_mut(&key) else {
-            bail!("Entry is empty")
-        };
-        let Entry::Data(expirable_data) = &mut entry else {
+        let entry = locked_cache
+            .entry(key)
+            .or_insert(Entry::Data(ExpireableData {
+                value: "0".as_bytes().to_vec(),
+                expire_at: None,
+            }));
+        let Entry::Data(expirable_data) = entry else {
             bail!("Entry value is not a numeric value")
         };
+
         if expirable_data.expired() {
-            bail!("Entry has expired")
-        } else {
-            let str_val = str::from_utf8(&expirable_data.value)?;
-            let val: u64 = str_val.parse()?;
-
-            expirable_data.value = format!("{}", val + 1).into_bytes();
-
-            Ok(val + 1)
+            expirable_data.expire_at = None;
+            expirable_data.value = "0".as_bytes().to_vec();
         }
+
+        let str_val = str::from_utf8(&expirable_data.value)?;
+        let val: u64 = str_val.parse()?;
+
+        expirable_data.value = format!("{}", val + 1).into_bytes();
+
+        Ok(val + 1)
     }
 
     pub async fn r_push(&self, key: String, values: Vec<String>) -> anyhow::Result<usize> {
@@ -882,5 +887,12 @@ mod db_tests {
 
         let inc = db.increment("foo".to_string()).await;
         assert_eq!(Some(7), inc.ok());
+
+        // None existing key should be set to 0 and then incremented to 1
+        let inc = db.increment("bar".to_string()).await;
+        assert_eq!(Some(1), inc.ok());
+
+        let inc = db.increment("bar".to_string()).await;
+        assert_eq!(Some(2), inc.ok());
     }
 }
