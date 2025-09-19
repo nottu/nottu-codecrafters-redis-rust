@@ -12,14 +12,29 @@ use crate::{
     resp::Frame,
 };
 
+use clap::Parser;
+
 mod commands;
 mod connection;
 mod db;
 mod resp;
 
+#[derive(Debug, Parser)]
+#[command(about = "A Redis server for CodeCrafters", version = "0.1")]
+struct Cli {
+    /// Port to listen on
+    #[arg(short, long, default_value_t = 6379)]
+    port: u16,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let listener = TcpListener::bind("127.0.0.1:6379").await?;
+    let cli = Cli::parse();
+
+    let addr = format!("127.0.0.1:{}", cli.port);
+    eprintln!("Listening on port {}", cli.port);
+
+    let listener = TcpListener::bind(&addr).await?;
 
     let cache = Db::new();
 
@@ -164,6 +179,7 @@ async fn process_connection(stream: TcpStream, cache: Db) -> anyhow::Result<()> 
         let command = connection.read_command().await?;
 
         let out_frame = match command {
+            // TODO: Transactions are not atomic!
             commands::Command::Multi => {
                 command_queue = Some(VecDeque::new());
                 Frame::ok()
