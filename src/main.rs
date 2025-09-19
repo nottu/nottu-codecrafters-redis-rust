@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{collections::VecDeque, time::Duration};
 
 use tokio::{
     net::{TcpListener, TcpStream},
@@ -6,7 +6,7 @@ use tokio::{
 };
 
 use crate::{
-    commands::{parse_xread, SetArgs},
+    commands::{parse_xread, Command, SetArgs},
     connection::Connection,
     db::Db,
     resp::Frame,
@@ -37,12 +37,15 @@ async fn main() -> anyhow::Result<()> {
 
 async fn process_connection(stream: TcpStream, cache: Db) -> anyhow::Result<()> {
     let mut connection = Connection::new(stream);
+    let mut command_queue: Option<VecDeque<Command>> = None;
     loop {
         let command = connection.read_command().await?;
+        if let Some(q) = &mut command_queue {
+            q.push_back(command);
+            connection.write_simple("QUEUED").await?;
+            continue;
+        }
         match command {
-            commands::Command::Close => {
-                return Ok(());
-            }
             commands::Command::Ping => {
                 connection.write_simple("PONG").await?;
             }
@@ -167,6 +170,10 @@ async fn process_connection(stream: TcpStream, cache: Db) -> anyhow::Result<()> 
                 } else {
                     connection.write_frame(Frame::Array(streams_data)).await?;
                 }
+            }
+            commands::Command::Multi => {
+                command_queue = Some(VecDeque::new());
+                connection.write_simple("OK").await?
             }
         }
         connection.flush().await?;

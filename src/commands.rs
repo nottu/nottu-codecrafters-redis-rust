@@ -11,19 +11,13 @@ pub enum Command {
     #[command(alias = "PING")]
     Ping,
     #[command(alias = "ECHO")]
-    Echo {
-        value: String,
-    },
+    Echo { value: String },
     #[command(alias = "SET")]
     Set(SetArgs),
     #[command(alias = "GET")]
-    Get {
-        key: String,
-    },
+    Get { key: String },
     #[command(alias = "INCR")]
-    Incr {
-        key: String,
-    },
+    Incr { key: String },
     #[command(alias = "RPUSH")]
     Rpush {
         list_key: String,
@@ -43,23 +37,16 @@ pub enum Command {
         end: i64,
     },
     #[command(alias = "LLEN")]
-    Llen {
-        list_key: String,
-    },
+    Llen { list_key: String },
     #[command(alias = "LPOP")]
     Lpop {
         list_key: String,
         num_elems: Option<usize>,
     },
     #[command(alias = "BLPOP")]
-    Blpop {
-        list_key: String,
-        time_out: f64,
-    },
+    Blpop { list_key: String, time_out: f64 },
     #[command(alias = "TYPE")]
-    Type {
-        key: String,
-    },
+    Type { key: String },
     #[command(alias = "XADD")]
     Xadd {
         key: String,
@@ -74,10 +61,9 @@ pub enum Command {
         upper_bound: String,
     },
     #[command(alias = "XREAD")]
-    Xread {
-        args: Vec<String>,
-    },
-    Close,
+    Xread { args: Vec<String> },
+    #[command(alias = "MULTI")]
+    Multi,
 }
 
 pub fn parse_xread(mut args: Vec<String>) -> anyhow::Result<Xread> {

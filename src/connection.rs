@@ -1,3 +1,4 @@
+use anyhow::bail;
 use clap::Parser;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, BufWriter},
@@ -27,17 +28,14 @@ impl Connection {
     pub async fn read_command(&mut self) -> anyhow::Result<Command> {
         let bytes_read = self.stream.read(&mut self.buf).await?;
         if bytes_read == 0 {
-            eprintln!("No data read, closing stream.");
-            return Ok(Command::Close);
+            bail!("Connection closed")
         }
 
         let data = str::from_utf8(&self.buf[..bytes_read])?;
         dbg!(data);
         let data = Frame::try_parse(data)?;
         let Frame::Array(command_args) = data else {
-            return Err(anyhow::anyhow!(
-                "expected an array with command and arguments, got {data:?}"
-            ));
+            bail!("expected an array with command and arguments, got {data:?}")
         };
         let parsed_commands = RedisCli::try_parse_from(
             // clap wants the first arg to be the program name... we pre-pend a value to comply
