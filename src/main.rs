@@ -126,6 +126,9 @@ async fn execute_atomic_command(command: Command, cache: &Db) -> anyhow::Result<
         commands::Command::Multi => {
             unreachable!("MULTI is not an atomic command")
         }
+        Command::Exec => {
+            unreachable!("EXEC is not an atomic command")
+        }
     };
     Ok(res_frame)
 }
@@ -162,6 +165,18 @@ async fn process_connection(stream: TcpStream, cache: Db) -> anyhow::Result<()> 
                 command_queue = Some(VecDeque::new());
                 Frame::ok()
             }
+            Command::Exec => match command_queue {
+                Some(commands) => {
+                    let mut resuls = vec![];
+                    for cmd in commands {
+                        let cmd_res = execute_atomic_command(cmd, &cache).await?;
+                        resuls.push(cmd_res);
+                    }
+                    command_queue = None;
+                    Frame::Array(resuls)
+                }
+                None => Frame::Error("ERR EXEC without MULTI".to_string()),
+            },
             commands::Command::Blpop { list_key, time_out } => {
                 let timeout = if time_out == 0.0 {
                     None
