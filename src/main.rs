@@ -6,7 +6,7 @@ use tokio::{
 };
 
 use crate::{
-    commands::{parse_xread, Command, SetArgs},
+    commands::{parse_xread_args, Command, SetArgs, XreadArgs},
     connection::Connection,
     db::Db,
     resp::Frame,
@@ -35,82 +35,132 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
+async fn execute_atomic_command(command: Command, cache: &Db) -> anyhow::Result<Frame> {
+    let res_frame: Frame = match command {
+        commands::Command::Ping => Frame::pong(),
+        commands::Command::Echo { value } => Frame::bulk_from_str(&value),
+        commands::Command::Set(SetArgs {
+            key,
+            value,
+            expiry_mode,
+        }) => {
+            let expire_at = expiry_mode.map(|ex_mod| {
+                Instant::now()
+                    + match ex_mod {
+                        commands::Expiry::Ex { seconds } => Duration::from_secs(seconds),
+                        commands::Expiry::Px { millis } => Duration::from_millis(millis),
+                    }
+            });
+            cache.set(key, value, expire_at).await;
+            Frame::ok()
+        }
+        commands::Command::Get { key } => match cache.get(key).await {
+            None => Frame::NullBulk,
+            Some(v) => Frame::Bulk(v),
+        },
+        commands::Command::Incr { key } => match cache.increment(key).await {
+            Ok(val) => Frame::Int(val as i64),
+            Err(err) => Frame::Error(err.to_string()),
+        },
+        commands::Command::Rpush { list_key, values } => {
+            let num_elems = cache.r_push(list_key, values).await?;
+            Frame::Int(num_elems as i64)
+        }
+        commands::Command::Lpush { list_key, values } => {
+            let num_elems = cache.l_push(list_key, values).await?;
+            Frame::Int(num_elems as i64)
+        }
+        commands::Command::Lrange {
+            list_key,
+            start,
+            end,
+        } => {
+            let res = cache.l_range(list_key, start, end).await?;
+            Frame::Array(res.into_iter().map(|v| Frame::Bulk(v)).collect())
+        }
+        commands::Command::Llen { list_key } => {
+            let num_elems = cache.l_len(list_key).await?;
+            Frame::Int(num_elems as i64)
+        }
+        commands::Command::Lpop {
+            list_key,
+            num_elems,
+        } => {
+            let popped = cache.l_pop(list_key, num_elems.unwrap_or(1)).await?;
+
+            if popped.len() == 1 {
+                // guaranteed to have one value, this way we don't clone
+                let val = popped.into_iter().next().unwrap();
+                Frame::Bulk(val)
+            } else {
+                Frame::Array(popped.into_iter().map(|v| Frame::Bulk(v)).collect())
+            }
+        }
+        commands::Command::Type { key } => {
+            let entry_type = cache.entry_type(key).await;
+            Frame::SimpleString(entry_type.to_string())
+        }
+        commands::Command::Xadd {
+            key,
+            stream_id,
+            data,
+        } => match cache.x_add(key, stream_id, &data).await {
+            Ok(stream_id) => Frame::Bulk(stream_id.into_bytes()),
+            Err(err) => Frame::Error(err.to_string()),
+        },
+        commands::Command::Xrange {
+            key,
+            lower_bound,
+            upper_bound,
+        } => cache.x_range(key, lower_bound, upper_bound).await?,
+        commands::Command::Xread { args } => {
+            let xread_args = parse_xread_args(args)?;
+            x_read(xread_args, &cache).await?
+        }
+        commands::Command::Blpop {
+            list_key: _,
+            time_out: _,
+        } => {
+            unreachable!("BLPOP is not an aotmic command")
+        }
+        commands::Command::Multi => {
+            unreachable!("MULTI is not an atomic command")
+        }
+    };
+    Ok(res_frame)
+}
+
+async fn x_read(xread_args: XreadArgs, cache: &Db) -> anyhow::Result<Frame> {
+    // this could get big... might not be ideal to hold in memory
+    let mut streams_data = Vec::with_capacity(xread_args.keys.len());
+
+    // TODO: How should we handle multiple blocking xread?
+    // Can/Should we send this async?
+    for (key, lower_bound) in xread_args.keys.into_iter().zip(xread_args.streams) {
+        let data = cache.x_read(xread_args.block, key, lower_bound).await?;
+        if let Frame::NullArray = data {
+            continue;
+        }
+        streams_data.push(data);
+    }
+    let res = if streams_data.is_empty() {
+        Frame::NullArray
+    } else {
+        Frame::Array(streams_data)
+    };
+    Ok(res)
+}
+
 async fn process_connection(stream: TcpStream, cache: Db) -> anyhow::Result<()> {
     let mut connection = Connection::new(stream);
     let mut command_queue: Option<VecDeque<Command>> = None;
     loop {
         let command = connection.read_command().await?;
-        if let Some(q) = &mut command_queue {
-            q.push_back(command);
-            connection.write_simple("QUEUED").await?;
-            continue;
-        }
-        match command {
-            commands::Command::Ping => {
-                connection.write_simple("PONG").await?;
-            }
-            commands::Command::Echo { value } => {
-                connection.write_bytes(value.as_bytes()).await?;
-            }
-            commands::Command::Set(SetArgs {
-                key,
-                value,
-                expiry_mode,
-            }) => {
-                let expire_at = expiry_mode.map(|ex_mod| {
-                    Instant::now()
-                        + match ex_mod {
-                            commands::Expiry::Ex { seconds } => Duration::from_secs(seconds),
-                            commands::Expiry::Px { millis } => Duration::from_millis(millis),
-                        }
-                });
-                cache.set(key, value, expire_at).await;
-                connection.write_simple("OK").await?;
-            }
-            commands::Command::Get { key } => {
-                let cached_value = cache.get(key).await;
-                match cached_value {
-                    None => connection.write_nil().await?,
-                    Some(v) => connection.write_bytes(&v).await?,
-                };
-            }
-            commands::Command::Incr { key } => match cache.increment(key).await {
-                Ok(val) => connection.write_int(val).await?,
-                Err(err) => connection.write_simple_err(&err.to_string()).await?,
-            },
-            commands::Command::Rpush { list_key, values } => {
-                let num_elems = cache.r_push(list_key, values).await?;
-                connection.write_int(num_elems as u64).await?;
-            }
-            commands::Command::Lpush { list_key, values } => {
-                let num_elems = cache.l_push(list_key, values).await?;
-                connection.write_int(num_elems as u64).await?;
-            }
-            commands::Command::Lrange {
-                list_key,
-                start,
-                end,
-            } => {
-                let res = cache.l_range(list_key, start, end).await?;
-                connection.write_array(&res).await?;
-            }
-            commands::Command::Llen { list_key } => {
-                let num_elems = cache.l_len(list_key).await?;
-                connection.write_int(num_elems as u64).await?;
-            }
-            commands::Command::Lpop {
-                list_key,
-                num_elems,
-            } => {
-                let popped = cache.l_pop(list_key, num_elems.unwrap_or(1)).await?;
 
-                if popped.len() == 1 {
-                    // guaranteed to have one value, this way we don't clone
-                    let val = popped.into_iter().next().unwrap();
-                    connection.write_bytes(&val).await?;
-                } else {
-                    connection.write_array(&popped).await?;
-                }
+        let out_frame = match command {
+            commands::Command::Multi => {
+                command_queue = Some(VecDeque::new());
+                Frame::ok()
             }
             commands::Command::Blpop { list_key, time_out } => {
                 let timeout = if time_out == 0.0 {
@@ -118,64 +168,39 @@ async fn process_connection(stream: TcpStream, cache: Db) -> anyhow::Result<()> 
                 } else {
                     Some(Instant::now() + Duration::from_secs_f64(time_out))
                 };
-                eprint!("calling bl_popped");
                 let popped = cache.bl_pop(list_key.clone(), timeout).await;
-                eprintln!("bl_poped returned {popped:?}");
                 match popped? {
                     Some(popped) => {
-                        connection
-                            .write_array(&[list_key.into_bytes(), popped])
-                            .await?
+                        let list_key_frame = Frame::Bulk(list_key.into_bytes());
+                        let popped_frame = Frame::Bulk(popped);
+                        Frame::Array(vec![list_key_frame, popped_frame])
                     }
-                    None => connection.write_nil_array().await?,
+                    None => Frame::NullArray,
                 }
-            }
-            commands::Command::Type { key } => {
-                let entry_type = cache.entry_type(key).await;
-                connection.write_simple(entry_type).await?;
-            }
-            commands::Command::Xadd {
-                key,
-                stream_id,
-                data,
-            } => match cache.x_add(key, stream_id, &data).await {
-                Ok(stream_id) => connection.write_bytes(stream_id.as_bytes()).await?,
-                Err(err) => connection.write_simple_err(&err.to_string()).await?,
-            },
-            commands::Command::Xrange {
-                key,
-                lower_bound,
-                upper_bound,
-            } => {
-                let data = cache.x_range(key, lower_bound, upper_bound).await?;
-                connection.write_frame(data).await?;
             }
             commands::Command::Xread { args } => {
-                let x_read = parse_xread(args)?;
-
-                // this could get big... might not be ideal to hold in memory
-                let mut streams_data = Vec::with_capacity(x_read.keys.len());
-                let block = x_read.block;
-                // TODO: How should we handle multiple blocking xread?
-                // Can/Should we send this async?
-                for (key, lower_bound) in x_read.keys.into_iter().zip(x_read.streams) {
-                    let data = cache.x_read(block, key, lower_bound).await?;
-                    if let Frame::NullArray = data {
-                        continue;
+                // TODO: avoid clone, maybe use an intermediate db_proxy?
+                let xread_args = parse_xread_args(args.clone())?;
+                if let Some(q) = &mut command_queue {
+                    if xread_args.block.is_some() {
+                        Frame::Error("Blocking XREAD not allowed in a transaction".to_string())
+                    } else {
+                        q.push_back(commands::Command::Xread { args });
+                        Frame::SimpleString("QUEUED".to_string())
                     }
-                    streams_data.push(data);
-                }
-                if streams_data.is_empty() {
-                    connection.write_frame(Frame::NullArray).await?;
                 } else {
-                    connection.write_frame(Frame::Array(streams_data)).await?;
+                    x_read(xread_args, &cache).await?
                 }
             }
-            commands::Command::Multi => {
-                command_queue = Some(VecDeque::new());
-                connection.write_simple("OK").await?
+            _ => {
+                if let Some(q) = &mut command_queue {
+                    q.push_back(command);
+                    Frame::SimpleString("QUEUED".to_string())
+                } else {
+                    execute_atomic_command(command, &cache).await?
+                }
             }
-        }
-        connection.flush().await?;
+        };
+        connection.write_frame(&out_frame).await?;
     }
 }

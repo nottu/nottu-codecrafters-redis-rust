@@ -43,29 +43,8 @@ impl Connection {
         )?;
         Ok(parsed_commands.command)
     }
-    pub async fn write_nil(&mut self) -> anyhow::Result<()> {
-        self.stream.write_all(b"$-1\r\n").await?;
-        Ok(())
-    }
-    pub async fn write_nil_array(&mut self) -> anyhow::Result<()> {
-        self.stream.write_all(b"*-1\r\n").await?;
-        Ok(())
-    }
-    pub async fn write_simple(&mut self, s: &str) -> anyhow::Result<()> {
-        self.stream.write(b"+").await?;
-        self.stream.write(s.as_bytes()).await?;
-        self.stream.write(b"\r\n").await?;
-        self.stream.flush().await?;
-        Ok(())
-    }
-    pub async fn write_bytes(&mut self, data: &[u8]) -> anyhow::Result<()> {
-        self.stream.write_all(b"$").await?;
-        self.write_decimal(data.len() as u64).await?;
-        self.stream.write(data).await?;
-        self.stream.write(b"\r\n").await?;
-        Ok(())
-    }
-    async fn write_decimal(&mut self, val: u64) -> anyhow::Result<()> {
+
+    async fn write_decimal(&mut self, val: i64) -> anyhow::Result<()> {
         use std::io::{Cursor, Write};
 
         let buf = [0u8; 20];
@@ -77,32 +56,54 @@ impl Connection {
         self.stream.write_all(b"\r\n").await?;
         Ok(())
     }
-    pub async fn write_int(&mut self, val: u64) -> anyhow::Result<()> {
-        self.stream.write_all(b":").await?;
-        self.write_decimal(val).await?;
-        Ok(())
-    }
-    pub async fn write_array(&mut self, data: &[Vec<u8>]) -> anyhow::Result<()> {
-        self.stream.write_all(b"*").await?;
-        self.write_decimal(data.len() as u64).await?;
-        for d in data {
-            self.write_bytes(d).await?;
-        }
-        Ok(())
-    }
-    pub async fn write_simple_err(&mut self, err: &str) -> anyhow::Result<()> {
-        self.stream.write_all(b"-").await?;
-        self.stream.write_all(err.as_bytes()).await?;
-        self.stream.write_all(b"\r\n").await?;
-        Ok(())
-    }
-    pub async fn write_frame(&mut self, frame: Frame) -> anyhow::Result<()> {
+
+    pub async fn write_frame(&mut self, frame: &Frame) -> anyhow::Result<()> {
         // TODO avoid creating a new String...
-        self.stream.write_all(&frame.to_string().as_bytes()).await?;
+        // self.stream.write_all(&frame.to_string().as_bytes()).await?;
+        match frame {
+            Frame::Array(arr) => {
+                self.stream.write_all(b"*").await?;
+                self.write_decimal(arr.len() as i64).await?;
+                for value in arr {
+                    self.write_value(&value).await?;
+                }
+            }
+            _ => self.write_value(frame).await?,
+        }
+        self.stream.flush().await?;
         Ok(())
     }
-    pub async fn flush(&mut self) -> anyhow::Result<()> {
-        self.stream.flush().await?;
+
+    async fn write_value(&mut self, frame: &Frame) -> anyhow::Result<()> {
+        match frame {
+            Frame::Array(_) => {
+                // we can't do recursive calls in an async context,
+                // create a string for the whole array and write that
+                self.stream.write_all(&frame.to_string().as_bytes()).await?;
+            }
+            Frame::NullArray => self.stream.write_all(b"*-1\r\n").await?,
+            Frame::NullBulk => self.stream.write_all(b"$-1\r\n").await?,
+            Frame::SimpleString(s) => {
+                self.stream.write(b"+").await?;
+                self.stream.write(s.as_bytes()).await?;
+                self.stream.write(b"\r\n").await?;
+            }
+            Frame::Bulk(data) => {
+                self.stream.write_all(b"$").await?;
+                self.write_decimal(data.len() as i64).await?;
+                self.stream.write(data).await?;
+                self.stream.write(b"\r\n").await?;
+            }
+            Frame::Int(val) => {
+                self.stream.write_all(b":").await?;
+                self.write_decimal(*val).await?;
+            }
+            Frame::Error(err) => {
+                self.stream.write_all(b"-").await?;
+                self.stream.write_all(err.as_bytes()).await?;
+                self.stream.write_all(b"\r\n").await?;
+            }
+        }
         Ok(())
     }
 }

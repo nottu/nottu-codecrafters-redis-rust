@@ -66,7 +66,7 @@ pub enum Command {
     Multi,
 }
 
-pub fn parse_xread(mut args: Vec<String>) -> anyhow::Result<Xread> {
+pub fn parse_xread_args(mut args: Vec<String>) -> anyhow::Result<XreadArgs> {
     if args.len() < 3 {
         anyhow::bail!("Not enough args for xread {args:?}")
     };
@@ -93,14 +93,15 @@ pub fn parse_xread(mut args: Vec<String>) -> anyhow::Result<Xread> {
     }
     let lower_bounds = args.split_off(args.len() / 2);
     let entry_keys = args;
-    Ok(Xread {
+    Ok(XreadArgs {
         block,
         keys: entry_keys,
         streams: lower_bounds,
     })
 }
 
-pub struct Xread {
+#[derive(Debug, Clone)]
+pub struct XreadArgs {
     pub block: Option<u64>,
     pub keys: Vec<String>,
     pub streams: Vec<String>,
@@ -127,7 +128,7 @@ mod command_test {
     use clap::Parser;
 
     use crate::{
-        commands::{parse_xread, Command, Expiry, RedisCli},
+        commands::{parse_xread_args, Command, Expiry, RedisCli},
         resp::Frame,
     };
 
@@ -186,11 +187,11 @@ mod command_test {
         ];
 
         let Command::Xread { args: x_read_args } = RedisCli::parse_from(&args).command else {
-            todo!()
+            unreachable!("expected xread")
         };
         dbg!(&x_read_args);
 
-        let parsed_xread = parse_xread(x_read_args).expect("expected valid xread");
+        let parsed_xread = parse_xread_args(x_read_args).expect("expected valid xread");
         assert_eq!(Some(100), parsed_xread.block);
 
         assert_eq!(vec!["some_key".to_string()], parsed_xread.keys);

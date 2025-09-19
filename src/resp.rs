@@ -12,8 +12,6 @@ pub enum Frame {
 }
 
 impl Frame {
-    pub const NULL_BULK: &'static str = "$-1\r\n";
-
     pub fn try_parse(s: &str) -> anyhow::Result<Self> {
         Self::recursive_parse(s).map(|(r, _cnt)| r)
     }
@@ -110,6 +108,13 @@ impl Frame {
     }
     pub fn bulk_from_str(s: &str) -> Self {
         Self::buld_from_string(s.to_string())
+    }
+
+    pub fn pong() -> Self {
+        Self::SimpleString("PONG".to_string())
+    }
+    pub fn ok() -> Self {
+        Self::SimpleString("OK".to_string())
     }
 }
 
