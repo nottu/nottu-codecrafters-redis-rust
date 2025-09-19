@@ -20,6 +20,10 @@ pub enum Command {
     Get {
         key: String,
     },
+    #[command(alias = "INCR")]
+    Incr {
+        key: String,
+    },
     #[command(alias = "RPUSH")]
     Rpush {
         list_key: String,

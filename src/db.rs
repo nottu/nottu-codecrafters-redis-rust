@@ -5,6 +5,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use anyhow::bail;
 use tokio::{
     sync::{oneshot, Mutex},
     time::Instant,
@@ -307,7 +308,7 @@ impl Db {
             return None;
         };
         let Entry::Data(expirable_data) = &entry else {
-            panic!("should be a vec<u8>")
+            panic!("Entry value is not a numeric value")
         };
         // return value if not expired
         if expirable_data.expired() {
@@ -316,6 +317,26 @@ impl Db {
             None
         } else {
             Some(expirable_data.value.clone())
+        }
+    }
+
+    pub async fn increment(&self, key: String) -> anyhow::Result<u64> {
+        let mut locked_cache = self.data.lock().await;
+        let Some(mut entry) = locked_cache.get_mut(&key) else {
+            bail!("Entry is empty")
+        };
+        let Entry::Data(expirable_data) = &mut entry else {
+            bail!("Entry value is not a numeric value")
+        };
+        if expirable_data.expired() {
+            bail!("Entry has expired")
+        } else {
+            let str_val = str::from_utf8(&expirable_data.value)?;
+            let val: u64 = str_val.parse()?;
+
+            expirable_data.value = format!("{}", val + 1).into_bytes();
+
+            Ok(val + 1)
         }
     }
 
@@ -848,5 +869,18 @@ mod db_tests {
             .x_range("mango".to_string(), "-".to_string(), "+".to_string())
             .await;
         assert!(x_range_res.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_incr() {
+        let db = Db::new();
+
+        db.set("foo".to_string(), "5".to_string(), None).await;
+
+        let inc = db.increment("foo".to_string()).await;
+        assert_eq!(Some(6), inc.ok());
+
+        let inc = db.increment("foo".to_string()).await;
+        assert_eq!(Some(7), inc.ok());
     }
 }
