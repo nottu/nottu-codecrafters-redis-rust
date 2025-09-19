@@ -53,7 +53,7 @@ impl NotifyStream {
     }
 
     fn add(&mut self, entry_id: String, field_values: &[String]) -> anyhow::Result<String> {
-        let entry_id = self.get_next_stream_entry_id(entry_id)?;
+        let entry_id = self.generate_stream_entry_id(entry_id)?;
 
         let entry = self.data.entry(entry_id).or_insert(BTreeMap::default());
         for (field, value) in field_values.chunks_exact(2).map(|c| (&c[0], &c[1])) {
@@ -64,10 +64,11 @@ impl NotifyStream {
         Ok(entry_id.to_string())
     }
 
-    /// Gets next entry_id and validates it.
+    /// Generates entry_id and validates it.
+    ///
     /// stream id are always composed of two integers: `<millisecondsTime>`-`<sequenceNumber>`
     /// Entry IDs are unique within a stream, and they're guaranteed to be incremental
-    fn get_next_stream_entry_id(&self, entry_id: String) -> anyhow::Result<StreamId> {
+    fn generate_stream_entry_id(&self, entry_id: String) -> anyhow::Result<StreamId> {
         let prev_entry_id = self.data.last_key_value().map(|(k, _v)| k);
         if entry_id == "0-0" {
             anyhow::bail!("ERR The ID specified in XADD must be greater than 0-0");
@@ -131,6 +132,10 @@ impl NotifyStream {
 
         Ok(new_entry_id)
     }
+
+    fn get_last_stream_entry_id(&self) -> Option<StreamId> {
+        self.data.last_key_value().map(|(k, _v)| k.clone())
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
@@ -142,6 +147,13 @@ struct StreamId {
 impl StreamId {
     fn to_string(&self) -> String {
         format!("{}-{}", self.millisecond_time, self.sequence_number)
+    }
+
+    const fn zero() -> Self {
+        Self {
+            millisecond_time: 0,
+            sequence_number: 0,
+        }
     }
 }
 
@@ -561,12 +573,10 @@ impl Db {
         let Entry::Stream(notify_stream) = stream_entry else {
             anyhow::bail!("Entry is not a stream");
         };
+
         let stream_id = notify_stream
-            .data
-            .last_key_value()
-            .map(|(k, _v)| k.clone())
-            // 0-0 is an invalid StreamId, but it's fine here
-            .unwrap_or("0-0".to_string().try_into().unwrap());
+            .get_last_stream_entry_id()
+            .unwrap_or(StreamId::zero());
         Ok(stream_id)
     }
 
