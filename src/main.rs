@@ -10,6 +10,7 @@ use crate::{
     connection::Connection,
     db::Db,
     resp::Frame,
+    server::Server,
 };
 
 use clap::Parser;
@@ -18,6 +19,7 @@ mod commands;
 mod connection;
 mod db;
 mod resp;
+mod server;
 
 #[derive(Debug, Parser)]
 #[command(about = "A Redis server for CodeCrafters", version = "0.1")]
@@ -120,7 +122,7 @@ async fn execute_atomic_command(command: Command, cache: &Db) -> anyhow::Result<
             stream_id,
             data,
         } => match cache.x_add(key, stream_id, &data).await {
-            Ok(stream_id) => Frame::Bulk(stream_id.into_bytes()),
+            Ok(stream_id) => Frame::bulk_from_string(stream_id),
             Err(err) => Frame::Error(err.to_string()),
         },
         commands::Command::Xrange {
@@ -132,20 +134,8 @@ async fn execute_atomic_command(command: Command, cache: &Db) -> anyhow::Result<
             let xread_args = parse_xread_args(args)?;
             x_read(xread_args, &cache).await?
         }
-        commands::Command::Blpop {
-            list_key: _,
-            time_out: _,
-        } => {
-            unreachable!("BLPOP is not an aotmic command")
-        }
-        commands::Command::Multi => {
-            unreachable!("MULTI is not an atomic command")
-        }
-        Command::Exec => {
-            unreachable!("EXEC is not an atomic command")
-        }
-        Command::Discard => {
-            unreachable!("DISCARD is not an atomic command")
+        _ => {
+            unreachable!("{command:?}")
         }
     };
     Ok(res_frame)
@@ -175,10 +165,15 @@ async fn x_read(xread_args: XreadArgs, cache: &Db) -> anyhow::Result<Frame> {
 async fn process_connection(stream: TcpStream, cache: Db) -> anyhow::Result<()> {
     let mut connection = Connection::new(stream);
     let mut command_queue: Option<VecDeque<Command>> = None;
+    let server = Server::new();
     loop {
         let command = connection.read_command().await?;
 
         let out_frame = match command {
+            Command::Info { info } => match info.as_str() {
+                "replication" => Frame::bulk_from_string(server.get_info()),
+                _ => Frame::Error("Unknown Info command {info}".to_string()),
+            },
             // TODO: Transactions are not atomic!
             commands::Command::Multi => {
                 command_queue = Some(VecDeque::new());
@@ -212,7 +207,7 @@ async fn process_connection(stream: TcpStream, cache: Db) -> anyhow::Result<()> 
                 let popped = cache.bl_pop(list_key.clone(), timeout).await;
                 match popped? {
                     Some(popped) => {
-                        let list_key_frame = Frame::Bulk(list_key.into_bytes());
+                        let list_key_frame = Frame::bulk_from_string(list_key);
                         let popped_frame = Frame::Bulk(popped);
                         Frame::Array(vec![list_key_frame, popped_frame])
                     }

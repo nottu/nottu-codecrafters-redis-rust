@@ -103,11 +103,11 @@ impl Frame {
             Self::NullArray => "*-1\r\n".to_string(),
         }
     }
-    pub fn buld_from_string(s: String) -> Self {
+    pub fn bulk_from_string(s: String) -> Self {
         Self::Bulk(s.into_bytes())
     }
     pub fn bulk_from_str(s: &str) -> Self {
-        Self::buld_from_string(s.to_string())
+        Self::bulk_from_string(s.to_string())
     }
 
     pub fn pong() -> Self {

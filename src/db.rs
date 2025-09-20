@@ -592,7 +592,7 @@ impl Db {
         if let Frame::NullArray = stream_data {
             Ok(Frame::NullArray)
         } else {
-            let stream_data = Frame::Array([Frame::buld_from_string(key), stream_data].to_vec());
+            let stream_data = Frame::Array([Frame::bulk_from_string(key), stream_data].to_vec());
             Ok(stream_data)
         }
     }
@@ -644,7 +644,7 @@ impl Db {
                     .collect();
                 output.push(Frame::Array(
                     [
-                        Frame::buld_from_string(stream_id.to_string()),
+                        Frame::bulk_from_string(stream_id.to_string()),
                         Frame::Array(values),
                     ]
                     .to_vec(),

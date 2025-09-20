@@ -8,6 +8,8 @@ pub struct RedisCli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    #[command(alias = "INFO")]
+    Info { info: String },
     #[command(alias = "PING")]
     Ping,
     #[command(alias = "ECHO")]
