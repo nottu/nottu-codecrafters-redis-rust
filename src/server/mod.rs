@@ -1,3 +1,4 @@
+#[derive(Debug, Clone)]
 pub struct Server {
     info: Info,
 }
@@ -10,12 +11,19 @@ impl Server {
             },
         }
     }
+    pub fn replicate(_master: &str) -> Self {
+        Self {
+            info: Info {
+                role: "slave".to_string(),
+            },
+        }
+    }
     pub fn get_info(&self) -> String {
         (&self.info).into()
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Info {
     role: String,
 }

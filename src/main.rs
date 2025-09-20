@@ -27,6 +27,9 @@ struct Cli {
     /// Port to listen on
     #[arg(short, long, default_value_t = 6379)]
     port: u16,
+
+    #[arg(long)]
+    replicaof: Option<String>,
 }
 
 #[tokio::main]
@@ -39,13 +42,21 @@ async fn main() -> anyhow::Result<()> {
     let listener = TcpListener::bind(&addr).await?;
 
     let cache = Db::new();
+    let server = match cli.replicaof {
+        None => Server::new(),
+        Some(master) => {
+            eprint!("Replicating {master}");
+            Server::replicate(&master)
+        }
+    };
 
     loop {
         let (stream, _addr) = listener.accept().await?;
         // Clone/Increase ref count out of spawn so it can be moved
         let data = cache.clone();
+        let server = server.clone();
         tokio::spawn(async move {
-            if let Err(e) = process_connection(stream, data).await {
+            if let Err(e) = process_connection(stream, data, server).await {
                 eprintln!("{e:?}");
             }
         });
@@ -162,10 +173,9 @@ async fn x_read(xread_args: XreadArgs, cache: &Db) -> anyhow::Result<Frame> {
     Ok(res)
 }
 
-async fn process_connection(stream: TcpStream, cache: Db) -> anyhow::Result<()> {
+async fn process_connection(stream: TcpStream, cache: Db, server: Server) -> anyhow::Result<()> {
     let mut connection = Connection::new(stream);
     let mut command_queue: Option<VecDeque<Command>> = None;
-    let server = Server::new();
     loop {
         let command = connection.read_command().await?;
 
