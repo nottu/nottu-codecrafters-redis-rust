@@ -42,7 +42,9 @@ async fn main() -> anyhow::Result<()> {
         None => Server::new(),
         Some(master) => {
             eprint!("Replicating {master}");
-            Server::replicate(&master)
+            Server::replicate(master)
+                .await
+                .expect("Expected to replicate")
         }
     };
 

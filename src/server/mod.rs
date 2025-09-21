@@ -1,8 +1,9 @@
 use std::collections::VecDeque;
 
-use tokio::time::Instant;
+use tokio::{net::TcpStream, time::Instant};
 
 use crate::{
+    connection::Connection,
     resp::Frame,
     server::db::{Db, GuardedDb},
 };
@@ -115,12 +116,16 @@ impl Server {
             transaction_op: None,
         }
     }
-    pub fn replicate(_master: &str) -> Self {
-        Self {
+    pub async fn replicate(master: String) -> anyhow::Result<Self> {
+        let mut connection = Connection::new(TcpStream::connect(master.replace(" ", ":")).await?);
+        connection
+            .write_frame(&Frame::Array(vec![Frame::SimpleString("PING".to_string())]))
+            .await?;
+        Ok(Self {
             mode: Mode::Slave,
             db: Db::new(),
             transaction_op: None,
-        }
+        })
     }
     pub fn get_replication_info(&self) -> String {
         match &self.mode {
