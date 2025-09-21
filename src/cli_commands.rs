@@ -72,6 +72,12 @@ pub enum Command {
     Discard,
     #[command(alias = "REPLCONF")]
     Replconf { args: Vec<String> },
+    #[command(alias = "PSYNC")]
+    Psync {
+        master_id: String,
+        #[arg(allow_hyphen_values = true)]
+        offset: i64,
+    },
 }
 
 pub fn parse_xread_args(mut args: Vec<String>) -> anyhow::Result<XreadArgs> {

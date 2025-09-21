@@ -1,3 +1,5 @@
+use std::fmt;
+
 use anyhow::bail;
 use clap::Parser;
 use tokio::{
@@ -10,10 +12,18 @@ use crate::{
     resp::Frame,
 };
 
-#[derive(Debug)]
 pub struct Connection {
     stream: BufWriter<TcpStream>,
     buf: [u8; Self::BUF_SIZE],
+}
+
+impl fmt::Debug for Connection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Connection")
+            .field("stream", &self.stream)
+            .field("buf", &"[u8; BUF_SIZE]")
+            .finish()
+    }
 }
 
 /// Writed values in an encoded manner
@@ -43,7 +53,13 @@ impl Connection {
             bail!("Connection closed")
         }
 
-        let data = str::from_utf8(&self.buf[..bytes_read])?;
+        let data = str::from_utf8(&self.buf[..bytes_read]).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to parse response as utf8 string.\nErr: {e}\ndata: {:?}, lossy_str: {}",
+                &self.buf[..bytes_read],
+                String::from_utf8_lossy(&self.buf[..bytes_read])
+            )
+        })?;
         dbg!(data);
         Frame::try_parse(data)
     }

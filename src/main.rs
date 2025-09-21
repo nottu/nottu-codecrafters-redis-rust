@@ -43,12 +43,10 @@ async fn main() -> anyhow::Result<()> {
         None => Server::new(),
         Some(master) => {
             eprint!("Replicating {master}");
-            Server::replicate(master, &format!("{}", cli.port))
-                .await
-                .expect("Expected to replicate")
+            Server::replicate(master, &format!("{}", cli.port)).await?
         }
     };
-
+    eprintln!("Server Booted {server:?}");
     loop {
         let (stream, _addr) = listener.accept().await?;
         // Clone/Increase ref count out of spawn so it can be moved
@@ -73,6 +71,16 @@ async fn process_connection(stream: TcpStream, mut server: Server) -> anyhow::Re
             cli_commands::Command::Replconf { args } => {
                 dbg!("REPLCONF", &args);
                 Frame::ok()
+            }
+            cli_commands::Command::Psync {
+                master_id: _,
+                offset: _,
+            } => {
+                dbg!("PSYNC");
+                match server.get_id() {
+                    Some(id) => Frame::SimpleString(format!("FULLRESYNC {id} 0")),
+                    None => Frame::Error("ERR not a master node".to_string()),
+                }
             }
             _ => server.execute_command(translate_command(cli_command)).await,
         };

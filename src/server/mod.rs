@@ -1,6 +1,5 @@
 use std::{collections::VecDeque, sync::Arc};
 
-use anyhow::bail;
 use tokio::{net::TcpStream, sync::Mutex, time::Instant};
 
 use crate::{
@@ -117,61 +116,136 @@ impl Server {
             transaction_op: None,
         }
     }
+
+    pub fn get_id(&self) -> Option<String> {
+        match &self.mode {
+            Mode::Master { id, offset: _ } => Some(id.clone()),
+            Mode::Slave {
+                master_id: _,
+                master_connection: _,
+                offset: _,
+            } => None,
+        }
+    }
+
     pub async fn replicate(master: String, listening_port: &str) -> anyhow::Result<Self> {
-        let connection = Self::replication_handshake(master, listening_port).await?;
-        Ok(Self {
+        let (master_id, offset, connection) =
+            Self::replication_handshake(master, listening_port).await?;
+        let replica = Self {
             mode: Mode::Slave {
-                master: Arc::new(Mutex::new(connection)),
+                master_id,
+                offset,
+                master_connection: Arc::new(Mutex::new(connection)),
             },
             db: Db::new(),
             transaction_op: None,
-        })
+        };
+        Ok(replica)
     }
+
     async fn replication_handshake(
         master: String,
         listening_port: &str,
-    ) -> anyhow::Result<Connection> {
+    ) -> anyhow::Result<(String, usize, Connection)> {
         let mut connection = Connection::new(TcpStream::connect(master.replace(" ", ":")).await?);
-        connection
-            .write_frame(&Frame::Array(vec![Frame::SimpleString("PING".to_string())]))
-            .await?;
-        let resp = connection.read_frame().await?;
-        match resp {
-            Frame::SimpleString(res) if res == "PONG" => dbg!("Got PONG response!"),
-            Frame::SimpleString(_) => anyhow::bail!("Expected Simple String PONG"),
-            _ => anyhow::bail!("Expected simple string as reponse"),
+        // Ping master
+        {
+            eprintln!("replica_handshake: PING");
+            connection
+                .write_frame(&Frame::Array(vec![Frame::SimpleString("PING".to_string())]))
+                .await?;
+            let resp = connection.read_frame().await?;
+            match resp {
+                Frame::SimpleString(res) if res == "PONG" => dbg!("Got PONG response!"),
+                Frame::SimpleString(_) => anyhow::bail!("Expected Simple String PONG"),
+                _ => anyhow::bail!("Expected simple string as reponse"),
+            };
+        }
+        // Send listening port
+        {
+            eprintln!("replica_handshake: REPLCONF listening-port");
+            connection
+                .write_frame(&Frame::Array(vec![
+                    Frame::bulk_from_str("REPLCONF"),
+                    Frame::bulk_from_str("listening-port"),
+                    Frame::bulk_from_str(listening_port),
+                ]))
+                .await?;
+            let resp = connection.read_frame().await?;
+            match resp {
+                Frame::SimpleString(res) if res == "OK" => dbg!("Got OK response!"),
+                Frame::SimpleString(_) => anyhow::bail!("Expected Simple String PONG"),
+                _ => anyhow::bail!("Expected simple string as reponse"),
+            };
+        }
+        // Send capabilities info
+        {
+            eprintln!("replica_handshake: REPLCONF capa");
+            connection
+                .write_frame(&Frame::Array(vec![
+                    Frame::bulk_from_str("REPLCONF"),
+                    Frame::bulk_from_str("capa"),
+                    Frame::bulk_from_str("psync2"),
+                ]))
+                .await?;
+            let resp = connection.read_frame().await?;
+            match resp {
+                Frame::SimpleString(res) if res == "OK" => dbg!("Got OK response!"),
+                Frame::SimpleString(_) => anyhow::bail!("Expected Simple String OK"),
+                _ => anyhow::bail!("Expected simple string as reponse"),
+            };
+        }
+
+        // Send PSYNC command
+        let (master_id, offset) = {
+            eprintln!("replica_handshake: PSYNC");
+            connection
+                .write_frame(&Frame::Array(vec![
+                    Frame::bulk_from_str("PSYNC"),
+                    Frame::bulk_from_str("?"),
+                    Frame::bulk_from_str("-1"),
+                ]))
+                .await?;
+            // match connection.read_frame().await? {
+            //     Frame::SimpleString(res) => {
+            //         let mut res = res.split(" ");
+            //         // should have 3 items FULLRESYC <REPL_ID> <OFFSET>
+            //         let Some(resync) = res.next() else {
+            //             bail!("Expected a FULLRESYNC");
+            //         };
+            //         if resync != "FULLRESYNC" {
+            //             bail!("Expected a FULLRESYNC");
+            //         }
+
+            //         let Some(master_id) = res.next() else {
+            //             bail!("Expected <REPL_ID>")
+            //         };
+
+            //         let Some(offset) = res.next() else {
+            //             bail!("Expected <OFFSET>")
+            //         };
+
+            //         let offset: usize = offset
+            //             .parse()
+            //             .map_err(|_| anyhow::anyhow!("Expected a numeric offset"))?;
+
+            //         (master_id.to_string(), offset)
+            //     }
+            //     _ => anyhow::bail!("Expected simple string as reponse"),
+            // }
+            ("?".to_string(), 0)
         };
-        connection
-            .write_frame(&Frame::Array(vec![
-                Frame::bulk_from_str("REPLCONF"),
-                Frame::bulk_from_str("listening-port"),
-                Frame::bulk_from_str(listening_port),
-            ]))
-            .await?;
-        let resp = connection.read_frame().await?;
-        match resp {
-            Frame::SimpleString(res) if res == "OK" => dbg!("Got OK response!"),
-            Frame::SimpleString(_) => anyhow::bail!("Expected Simple String PONG"),
-            _ => anyhow::bail!("Expected simple string as reponse"),
-        };
-        connection
-            .write_frame(&Frame::Array(vec![
-                Frame::bulk_from_str("REPLCONF"),
-                Frame::bulk_from_str("capa"),
-                Frame::bulk_from_str("psync2"),
-            ]))
-            .await?;
-        let resp = connection.read_frame().await?;
-        match resp {
-            Frame::SimpleString(res) if res == "OK" => dbg!("Got OK response!"),
-            Frame::SimpleString(_) => anyhow::bail!("Expected Simple String PONG"),
-            _ => anyhow::bail!("Expected simple string as reponse"),
-        };
-        Ok(connection)
+
+        Ok((master_id, offset, connection))
     }
+
     pub fn get_replication_info(&self) -> String {
         match &self.mode {
-            Mode::Slave { master: _ } => format!("role:slave"),
+            Mode::Slave {
+                master_id,
+                offset,
+                master_connection: _,
+            } => format!("role:slave\nmaster_replid:{master_id}\nmaster_repl_offset:{offset}"),
             Mode::Master { id, offset } => {
                 format!("role:master\nmaster_replid:{id}\nmaster_repl_offset:{offset}")
             }
@@ -382,6 +456,13 @@ impl Clone for Server {
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 enum Mode {
-    Master { id: String, offset: usize },
-    Slave { master: Arc<Mutex<Connection>> },
+    Master {
+        id: String,
+        offset: usize,
+    },
+    Slave {
+        master_id: String,
+        offset: usize,
+        master_connection: Arc<Mutex<Connection>>,
+    },
 }
