@@ -1,6 +1,7 @@
-use std::collections::VecDeque;
+use std::{collections::VecDeque, sync::Arc};
 
-use tokio::{net::TcpStream, time::Instant};
+use anyhow::bail;
+use tokio::{net::TcpStream, sync::Mutex, time::Instant};
 
 use crate::{
     connection::Connection,
@@ -116,20 +117,61 @@ impl Server {
             transaction_op: None,
         }
     }
-    pub async fn replicate(master: String) -> anyhow::Result<Self> {
-        let mut connection = Connection::new(TcpStream::connect(master.replace(" ", ":")).await?);
-        connection
-            .write_frame(&Frame::Array(vec![Frame::SimpleString("PING".to_string())]))
-            .await?;
+    pub async fn replicate(master: String, listening_port: &str) -> anyhow::Result<Self> {
+        let connection = Self::replication_handshake(master, listening_port).await?;
         Ok(Self {
-            mode: Mode::Slave,
+            mode: Mode::Slave {
+                master: Arc::new(Mutex::new(connection)),
+            },
             db: Db::new(),
             transaction_op: None,
         })
     }
+    async fn replication_handshake(
+        master: String,
+        listening_port: &str,
+    ) -> anyhow::Result<Connection> {
+        let mut connection = Connection::new(TcpStream::connect(master.replace(" ", ":")).await?);
+        connection
+            .write_frame(&Frame::Array(vec![Frame::SimpleString("PING".to_string())]))
+            .await?;
+        let resp = connection.read_frame().await?;
+        match resp {
+            Frame::SimpleString(res) if res == "PONG" => dbg!("Got PONG response!"),
+            Frame::SimpleString(_) => anyhow::bail!("Expected Simple String PONG"),
+            _ => anyhow::bail!("Expected simple string as reponse"),
+        };
+        connection
+            .write_frame(&Frame::Array(vec![
+                Frame::bulk_from_str("REPLCONF"),
+                Frame::bulk_from_str("listening-port"),
+                Frame::bulk_from_str(listening_port),
+            ]))
+            .await?;
+        let resp = connection.read_frame().await?;
+        match resp {
+            Frame::SimpleString(res) if res == "OK" => dbg!("Got OK response!"),
+            Frame::SimpleString(_) => anyhow::bail!("Expected Simple String PONG"),
+            _ => anyhow::bail!("Expected simple string as reponse"),
+        };
+        connection
+            .write_frame(&Frame::Array(vec![
+                Frame::bulk_from_str("REPLCONF"),
+                Frame::bulk_from_str("capa"),
+                Frame::bulk_from_str("psync2"),
+            ]))
+            .await?;
+        let resp = connection.read_frame().await?;
+        match resp {
+            Frame::SimpleString(res) if res == "OK" => dbg!("Got OK response!"),
+            Frame::SimpleString(_) => anyhow::bail!("Expected Simple String PONG"),
+            _ => anyhow::bail!("Expected simple string as reponse"),
+        };
+        Ok(connection)
+    }
     pub fn get_replication_info(&self) -> String {
         match &self.mode {
-            Mode::Slave => format!("role:slave"),
+            Mode::Slave { master: _ } => format!("role:slave"),
             Mode::Master { id, offset } => {
                 format!("role:master\nmaster_replid:{id}\nmaster_repl_offset:{offset}")
             }
@@ -337,8 +379,9 @@ impl Clone for Server {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 enum Mode {
     Master { id: String, offset: usize },
-    Slave,
+    Slave { master: Arc<Mutex<Connection>> },
 }

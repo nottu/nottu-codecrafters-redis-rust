@@ -70,6 +70,8 @@ pub enum Command {
     Exec,
     #[command(alias = "DISCARD")]
     Discard,
+    #[command(alias = "REPLCONF")]
+    Replconf { args: Vec<String> },
 }
 
 pub fn parse_xread_args(mut args: Vec<String>) -> anyhow::Result<XreadArgs> {

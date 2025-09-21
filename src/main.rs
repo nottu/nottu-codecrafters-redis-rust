@@ -8,6 +8,7 @@ use tokio::{
 use crate::{
     cli_commands::{parse_xread_args, SetArgs, XreadArgs},
     connection::Connection,
+    resp::Frame,
     server::Server,
 };
 
@@ -42,7 +43,7 @@ async fn main() -> anyhow::Result<()> {
         None => Server::new(),
         Some(master) => {
             eprint!("Replicating {master}");
-            Server::replicate(master)
+            Server::replicate(master, &format!("{}", cli.port))
                 .await
                 .expect("Expected to replicate")
         }
@@ -69,6 +70,10 @@ async fn process_connection(stream: TcpStream, mut server: Server) -> anyhow::Re
             // Should PING and ECHO be done in "server"?
             cli_commands::Command::Ping => resp::Frame::SimpleString("PONG".to_string()),
             cli_commands::Command::Echo { value } => resp::Frame::Bulk(value.into_bytes()),
+            cli_commands::Command::Replconf { args } => {
+                dbg!("REPLCONF", &args);
+                Frame::ok()
+            }
             _ => server.execute_command(translate_command(cli_command)).await,
         };
         connection.write_frame(&out_frame).await?;
