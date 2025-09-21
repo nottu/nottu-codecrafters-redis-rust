@@ -206,34 +206,34 @@ impl Server {
                     Frame::bulk_from_str("-1"),
                 ]))
                 .await?;
-            // match connection.read_frame().await? {
-            //     Frame::SimpleString(res) => {
-            //         let mut res = res.split(" ");
-            //         // should have 3 items FULLRESYC <REPL_ID> <OFFSET>
-            //         let Some(resync) = res.next() else {
-            //             bail!("Expected a FULLRESYNC");
-            //         };
-            //         if resync != "FULLRESYNC" {
-            //             bail!("Expected a FULLRESYNC");
-            //         }
+            match connection.read_frame().await? {
+                Frame::SimpleString(res) => {
+                    let mut res = res.split(" ");
+                    // should have 3 items FULLRESYC <REPL_ID> <OFFSET>
+                    let Some(resync) = res.next() else {
+                        anyhow::bail!("Expected a FULLRESYNC");
+                    };
+                    if resync != "FULLRESYNC" {
+                        anyhow::bail!("Expected a FULLRESYNC");
+                    }
 
-            //         let Some(master_id) = res.next() else {
-            //             bail!("Expected <REPL_ID>")
-            //         };
+                    let Some(master_id) = res.next() else {
+                        anyhow::bail!("Expected <REPL_ID>")
+                    };
 
-            //         let Some(offset) = res.next() else {
-            //             bail!("Expected <OFFSET>")
-            //         };
+                    let Some(offset) = res.next() else {
+                        anyhow::bail!("Expected <OFFSET>")
+                    };
 
-            //         let offset: usize = offset
-            //             .parse()
-            //             .map_err(|_| anyhow::anyhow!("Expected a numeric offset"))?;
+                    let offset: usize = offset
+                        .parse()
+                        .map_err(|_| anyhow::anyhow!("Expected a numeric offset"))?;
 
-            //         (master_id.to_string(), offset)
-            //     }
-            //     _ => anyhow::bail!("Expected simple string as reponse"),
-            // }
-            ("?".to_string(), 0)
+                    (master_id.to_string(), offset)
+                }
+                _ => anyhow::bail!("Expected simple string as reponse"),
+            }
+            // ("?".to_string(), 0)
         };
 
         Ok((master_id, offset, connection))

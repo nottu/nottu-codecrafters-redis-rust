@@ -1,6 +1,7 @@
-use std::fmt;
+use std::{fmt, io::Cursor};
 
 use anyhow::bail;
+use bytes::Buf;
 use clap::Parser;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, BufWriter},
@@ -53,15 +54,12 @@ impl Connection {
             bail!("Connection closed")
         }
 
-        let data = str::from_utf8(&self.buf[..bytes_read]).map_err(|e| {
-            anyhow::anyhow!(
-                "Failed to parse response as utf8 string.\nErr: {e}\ndata: {:?}, lossy_str: {}",
-                &self.buf[..bytes_read],
-                String::from_utf8_lossy(&self.buf[..bytes_read])
-            )
-        })?;
-        dbg!(data);
-        Frame::try_parse(data)
+        let mut cursor = Cursor::new(&self.buf[..bytes_read]);
+        let frame = Frame::try_parse(&mut cursor)?;
+        if cursor.has_remaining() {
+            eprintln!("Remainig bytes in cursor!");
+        }
+        Ok(frame)
     }
 
     async fn write_decimal(&mut self, val: i64) -> anyhow::Result<()> {
