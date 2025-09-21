@@ -11,7 +11,7 @@ pub mod db;
 
 #[derive(Debug)]
 pub struct Server {
-    info: Info,
+    mode: Mode,
     db: Db,
     transaction_op: Option<TransactionOp>,
 }
@@ -106,8 +106,10 @@ pub enum Command {
 impl Server {
     pub fn new() -> Self {
         Self {
-            info: Info {
-                role: "master".to_string(),
+            mode: Mode::Master {
+                // TODO: Generate random ID instead
+                id: "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb".to_string(),
+                offset: 0,
             },
             db: Db::new(),
             transaction_op: None,
@@ -115,15 +117,18 @@ impl Server {
     }
     pub fn replicate(_master: &str) -> Self {
         Self {
-            info: Info {
-                role: "slave".to_string(),
-            },
+            mode: Mode::Slave,
             db: Db::new(),
             transaction_op: None,
         }
     }
-    pub fn get_info(&self) -> String {
-        (&self.info).into()
+    pub fn get_replication_info(&self) -> String {
+        match &self.mode {
+            Mode::Slave => format!("role:slave"),
+            Mode::Master { id, offset } => {
+                format!("role:master\nmaster_replid:{id}\nmaster_repl_offset:{offset}")
+            }
+        }
     }
 
     pub async fn execute_command(&mut self, command: Command) -> Frame {
@@ -131,7 +136,7 @@ impl Server {
         match command {
             // Not blocking, but should not be callable inside multi (?)
             Command::Info { info } => match info.as_str() {
-                "replication" => Frame::bulk_from_string(self.get_info()),
+                "replication" => Frame::bulk_from_string(self.get_replication_info()),
                 _ => Frame::Error("Unknown Info command {info}".to_string()),
             },
             Command::StartTransaction => {
@@ -320,7 +325,7 @@ impl Clone for Server {
     fn clone(&self) -> Self {
         debug_assert!(self.transaction_op.is_none());
         Self {
-            info: self.info.clone(),
+            mode: self.mode.clone(),
             db: self.db.clone(),
             transaction_op: None,
         }
@@ -328,12 +333,7 @@ impl Clone for Server {
 }
 
 #[derive(Debug, Clone)]
-struct Info {
-    role: String,
-}
-
-impl From<&Info> for String {
-    fn from(value: &Info) -> Self {
-        format!("role:{}", value.role)
-    }
+enum Mode {
+    Master { id: String, offset: usize },
+    Slave,
 }
