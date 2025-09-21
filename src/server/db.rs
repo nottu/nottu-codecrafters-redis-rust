@@ -158,9 +158,9 @@ impl StreamId {
     }
 }
 
-impl TryFrom<String> for StreamId {
+impl TryFrom<&str> for StreamId {
     type Error = &'static str;
-    fn try_from(value: String) -> Result<Self, Self::Error> {
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
         let mut vals = value.split("-");
         let millis = vals.next().ok_or("expected millis")?;
         let seq = vals.next().ok_or("expected sequence")?;
@@ -527,81 +527,121 @@ impl Db {
     ) -> anyhow::Result<Frame> {
         let lower_bound: StreamId = {
             if lower_bound == "-" {
-                "0-1".to_string()
+                "0-1".try_into()
             } else if lower_bound.contains("-") {
-                lower_bound
+                lower_bound.as_str().try_into()
             } else {
-                format!("{lower_bound}-0")
+                format!("{lower_bound}-0").as_str().try_into()
             }
         }
-        .try_into()
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
         let upper_bound: StreamId = {
             if upper_bound == "+" {
-                format!("{}-{}", u128::MAX, usize::MAX)
+                format!("{}-{}", u128::MAX, usize::MAX).as_str().try_into()
             } else if upper_bound.contains("-") {
-                upper_bound
+                upper_bound.as_str().try_into()
             } else {
-                format!("{upper_bound}-{}", usize::MAX)
+                format!("{upper_bound}-{}", usize::MAX).as_str().try_into()
             }
         }
-        .try_into()
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
         self.read_stream(
-            None,
             key,
             Bound::Included(lower_bound),
             Bound::Included(upper_bound),
         )
         .await
+        .map(|output| Frame::Array(output))
     }
-    pub async fn x_read(
+
+    async fn parse_xread_lower_bound(
         &self,
-        block: Option<u64>,
+        key: &str,
+        lower_bound: &str,
+    ) -> anyhow::Result<StreamId> {
+        let lower_bound: StreamId = if lower_bound == "$" {
+            self.get_last_stream_entry(&key).await?
+        } else if lower_bound == "-" {
+            "0-1".try_into().unwrap()
+        } else if lower_bound.contains("-") {
+            lower_bound
+                .try_into()
+                .map_err(|e| anyhow::anyhow!("failed parsing lower_boud with {e}"))?
+        } else {
+            format!("{lower_bound}-0")
+                .as_str()
+                .try_into()
+                .map_err(|e| anyhow::anyhow!("failed parsing lower_boud with {e}"))?
+        };
+        Ok(lower_bound)
+    }
+
+    /// Non Blocking read of a stream, reading from the range `(lower_bound, end]`
+    ///
+    /// Parses `lower_bound` in the following manner:
+    ///
+    /// * `$` Read starting from the last entry, empty in non-blocking mode
+    /// * `%` Read all items in stream including all sequence numbers, equivalen to `"0-1"`
+    /// * `<time>` Read all items after a give time stamp, returns all sequence numbers
+    /// * `<time>-<sequence_number>`
+    pub async fn x_read(&self, key: String, lower_bound: String) -> anyhow::Result<Frame> {
+        let lower_bound: StreamId = self.parse_xread_lower_bound(&key, &lower_bound).await?;
+
+        let stream_data = self
+            .read_stream(key.clone(), Bound::Excluded(lower_bound), Bound::Unbounded)
+            .await?;
+
+        if stream_data.is_empty() {
+            Ok(Frame::NullArray)
+        } else {
+            let stream_data =
+                Frame::Array([Frame::bulk_from_string(key), Frame::Array(stream_data)].to_vec());
+            Ok(stream_data)
+        }
+    }
+
+    /// Blocking read of a stream, reading from the range `(lower_bound, end]`.
+    /// Will wait upto `block_millis` for fata if no data exists in the stream for the given range.
+    ///
+    /// Parses `lower_bound` in the following manner:
+    ///
+    /// * `$` Read starting from the last entry
+    /// * `%` Read all items in stream including all sequence numbers, equivalen to `"0-1"`
+    /// * `<time>` Read all items after a give time stamp, returns all sequence numbers
+    /// * `<time>-<sequence_number>`
+    pub async fn blocking_x_read(
+        &self,
+        block_millis: u64,
         key: String,
         lower_bound: String,
     ) -> anyhow::Result<Frame> {
-        eprintln!("[x_read] key: {key}, lower_bound: {lower_bound}");
-        let lower_bound: StreamId = {
-            if lower_bound == "$" {
-                self.get_last_stream_entry(key.clone()).await?
-            } else if lower_bound == "-" {
-                "0-1".to_string().try_into().unwrap()
-            } else if lower_bound.contains("-") {
-                lower_bound
-                    .try_into()
-                    .map_err(|e| anyhow::anyhow!("failed parsing lower_boud with {e}"))?
-            } else {
-                format!("{lower_bound}-0")
-                    .try_into()
-                    .map_err(|e| anyhow::anyhow!("failed parsing lower_boud with {e}"))?
-            }
-        };
+        let lower_bound: StreamId = self.parse_xread_lower_bound(&key, &lower_bound).await?;
 
         let stream_data = self
-            .read_stream(
-                block,
+            .blocking_read_stream(
+                block_millis,
                 key.clone(),
                 Bound::Excluded(lower_bound),
                 Bound::Unbounded,
             )
             .await?;
 
-        if let Frame::NullArray = stream_data {
+        if stream_data.is_empty() {
             Ok(Frame::NullArray)
         } else {
-            let stream_data = Frame::Array([Frame::bulk_from_string(key), stream_data].to_vec());
+            let stream_data =
+                Frame::Array([Frame::bulk_from_string(key), Frame::Array(stream_data)].to_vec());
             Ok(stream_data)
         }
     }
 
-    async fn get_last_stream_entry(&self, key: String) -> anyhow::Result<StreamId> {
+    async fn get_last_stream_entry(&self, key: &str) -> anyhow::Result<StreamId> {
         let mut locked_cache = self.data.lock().await;
 
         let stream_entry = locked_cache
-            .entry(key.clone())
+            .entry(key.to_owned())
             .or_insert(Entry::Stream(NotifyStream::new()));
         let Entry::Stream(notify_stream) = stream_entry else {
             anyhow::bail!("Entry is not a stream");
@@ -615,63 +655,93 @@ impl Db {
 
     async fn read_stream(
         &self,
-        block: Option<u64>,
         key: String,
         lower_bound: Bound<StreamId>,
         upper_bound: Bound<StreamId>,
-    ) -> anyhow::Result<Frame> {
+    ) -> anyhow::Result<Vec<Frame>> {
+        eprintln!("Reading Stream from: {lower_bound:?}, to: {upper_bound:?}");
+
+        let mut locked_cache = self.data.lock().await;
+        let entry = {
+            locked_cache
+                .entry(key.clone())
+                .or_insert(Entry::Stream(NotifyStream::new()))
+        };
+
+        let Entry::Stream(stream_map) = entry else {
+            anyhow::bail!("Entry is not a stream");
+        };
+
+        // Should some of this be moved to NotifyStream?
+        let mut output = vec![];
+        for (stream_id, data) in stream_map.data.range((lower_bound, upper_bound)) {
+            let values: Vec<Frame> = data
+                .iter()
+                .map(|(k, v)| [k, v])
+                .flatten()
+                .map(|s| Frame::bulk_from_str(s))
+                .collect();
+            output.push(Frame::Array(
+                [
+                    Frame::bulk_from_string(stream_id.to_string()),
+                    Frame::Array(values),
+                ]
+                .to_vec(),
+            ));
+        }
+        return Ok(output);
+    }
+
+    /// A wrapper over read_stream that blocks for the given `block_millis` time.
+    ///
+    /// If `block_millis` is `0` it will block indefinitly
+    async fn blocking_read_stream(
+        &self,
+        block_millis: u64,
+        key: String,
+        lower_bound: Bound<StreamId>,
+        upper_bound: Bound<StreamId>,
+    ) -> anyhow::Result<Vec<Frame>> {
         eprintln!("Reading Stream from: {lower_bound:?}, to: {upper_bound:?}");
         loop {
-            let mut locked_cache = self.data.lock().await;
-            let entry = {
-                locked_cache
-                    .entry(key.clone())
-                    .or_insert(Entry::Stream(NotifyStream::new()))
+            // TODO: Can we avoid cloning the key every time?
+            let results = self
+                .read_stream(key.clone(), lower_bound, upper_bound)
+                .await?;
+            if !results.is_empty() {
+                return Ok(results);
+            }
+            // TODO: Move this logic elsewhere...
+            // On notified the waiter itself gets destroyed, so it's ok to create
+            // a new one on each loop iteration
+            let waiter = {
+                let mut locked_cache = self.data.lock().await;
+                let entry = {
+                    locked_cache
+                        .entry(key.clone())
+                        .or_insert(Entry::Stream(NotifyStream::new()))
+                };
+
+                let Entry::Stream(stream_map) = entry else {
+                    anyhow::bail!("Entry is not a stream");
+                };
+
+                stream_map.add_waiter()
             };
 
-            let Entry::Stream(stream_map) = entry else {
-                anyhow::bail!("Entry is not a stream");
-            };
-
-            // Should some of this be moved to NotifyStream?
-            let mut output = vec![];
-            for (stream_id, data) in stream_map.data.range((lower_bound, upper_bound)) {
-                let values: Vec<Frame> = data
-                    .iter()
-                    .map(|(k, v)| [k, v])
-                    .flatten()
-                    .map(|s| Frame::bulk_from_str(s))
-                    .collect();
-                output.push(Frame::Array(
-                    [
-                        Frame::bulk_from_string(stream_id.to_string()),
-                        Frame::Array(values),
-                    ]
-                    .to_vec(),
-                ));
-            }
-            if !output.is_empty() {
-                return Ok(Frame::Array(output));
-            }
-            let waiter = stream_map.add_waiter();
-            drop(locked_cache);
-            if let Some(millis) = block {
-                if millis == 0 {
-                    eprintln!("waiting until notified");
-                    waiter.await?;
-                    eprintln!("notified!")
-                } else {
-                    match tokio::time::timeout(Duration::from_millis(millis), waiter).await {
-                        Ok(_) => (),
-                        Err(e) => {
-                            eprintln!("Timed out: {e:?}");
-                            // only send null array when using block?
-                            return Ok(Frame::NullArray);
-                        }
+            if block_millis == 0 {
+                eprintln!("waiting until notified");
+                waiter.await?;
+                eprintln!("notified!")
+            } else {
+                match tokio::time::timeout(Duration::from_millis(block_millis), waiter).await {
+                    Ok(_) => (),
+                    Err(e) => {
+                        eprintln!("Timed out: {e:?}");
+                        // only send null array when using block?
+                        return Ok(vec![]);
                     }
                 }
-            } else {
-                return Ok(Frame::Array(vec![]));
             }
         }
     }
@@ -679,8 +749,7 @@ impl Db {
 
 #[cfg(test)]
 mod db_tests {
-
-    use crate::db::Db;
+    use crate::server::db::Db;
 
     #[tokio::test]
     async fn test_l_range() {

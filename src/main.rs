@@ -8,8 +8,8 @@ use tokio::{
 use crate::{
     commands::{parse_xread_args, Command, SetArgs, XreadArgs},
     connection::Connection,
-    db::Db,
     resp::Frame,
+    server::db::Db,
     server::Server,
 };
 
@@ -17,7 +17,6 @@ use clap::Parser;
 
 mod commands;
 mod connection;
-mod db;
 mod resp;
 mod server;
 
@@ -41,7 +40,6 @@ async fn main() -> anyhow::Result<()> {
 
     let listener = TcpListener::bind(&addr).await?;
 
-    let cache = Db::new();
     let server = match cli.replicaof {
         None => Server::new(),
         Some(master) => {
@@ -53,10 +51,9 @@ async fn main() -> anyhow::Result<()> {
     loop {
         let (stream, _addr) = listener.accept().await?;
         // Clone/Increase ref count out of spawn so it can be moved
-        let data = cache.clone();
         let server = server.clone();
         tokio::spawn(async move {
-            if let Err(e) = process_connection(stream, data, server).await {
+            if let Err(e) = process_connection(stream, server).await {
                 eprintln!("{e:?}");
             }
         });
@@ -159,7 +156,14 @@ async fn x_read(xread_args: XreadArgs, cache: &Db) -> anyhow::Result<Frame> {
     // TODO: How should we handle multiple blocking xread?
     // Can/Should we send this async?
     for (key, lower_bound) in xread_args.keys.into_iter().zip(xread_args.streams) {
-        let data = cache.x_read(xread_args.block, key, lower_bound).await?;
+        let data = match xread_args.block {
+            Some(block_millis) => {
+                cache
+                    .blocking_x_read(block_millis, key, lower_bound)
+                    .await?
+            }
+            None => cache.x_read(key, lower_bound).await?,
+        };
         if let Frame::NullArray = data {
             continue;
         }
@@ -173,7 +177,7 @@ async fn x_read(xread_args: XreadArgs, cache: &Db) -> anyhow::Result<Frame> {
     Ok(res)
 }
 
-async fn process_connection(stream: TcpStream, cache: Db, server: Server) -> anyhow::Result<()> {
+async fn process_connection(stream: TcpStream, server: Server) -> anyhow::Result<()> {
     let mut connection = Connection::new(stream);
     let mut command_queue: Option<VecDeque<Command>> = None;
     loop {
@@ -193,7 +197,7 @@ async fn process_connection(stream: TcpStream, cache: Db, server: Server) -> any
                 Some(commands) => {
                     let mut resuls = vec![];
                     for cmd in commands {
-                        let cmd_res = execute_atomic_command(cmd, &cache).await?;
+                        let cmd_res = execute_atomic_command(cmd, &server.db).await?;
                         resuls.push(cmd_res);
                     }
                     command_queue = None;
@@ -214,7 +218,7 @@ async fn process_connection(stream: TcpStream, cache: Db, server: Server) -> any
                 } else {
                     Some(Instant::now() + Duration::from_secs_f64(time_out))
                 };
-                let popped = cache.bl_pop(list_key.clone(), timeout).await;
+                let popped = server.db.bl_pop(list_key.clone(), timeout).await;
                 match popped? {
                     Some(popped) => {
                         let list_key_frame = Frame::bulk_from_string(list_key);
@@ -235,7 +239,7 @@ async fn process_connection(stream: TcpStream, cache: Db, server: Server) -> any
                         Frame::SimpleString("QUEUED".to_string())
                     }
                 } else {
-                    x_read(xread_args, &cache).await?
+                    x_read(xread_args, &server.db).await?
                 }
             }
             _ => {
@@ -243,7 +247,7 @@ async fn process_connection(stream: TcpStream, cache: Db, server: Server) -> any
                     q.push_back(command);
                     Frame::SimpleString("QUEUED".to_string())
                 } else {
-                    execute_atomic_command(command, &cache).await?
+                    execute_atomic_command(command, &server.db).await?
                 }
             }
         };
