@@ -1,4 +1,4 @@
-use std::{collections::VecDeque, time::Duration};
+use std::time::Duration;
 
 use tokio::{
     net::{TcpListener, TcpStream},
@@ -6,16 +6,14 @@ use tokio::{
 };
 
 use crate::{
-    commands::{parse_xread_args, Command, SetArgs, XreadArgs},
+    cli_commands::{parse_xread_args, SetArgs, XreadArgs},
     connection::Connection,
-    resp::Frame,
-    server::db::Db,
     server::Server,
 };
 
 use clap::Parser;
 
-mod commands;
+mod cli_commands;
 mod connection;
 mod resp;
 mod server;
@@ -60,11 +58,28 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-async fn execute_atomic_command(command: Command, cache: &Db) -> anyhow::Result<Frame> {
-    let res_frame: Frame = match command {
-        commands::Command::Ping => Frame::pong(),
-        commands::Command::Echo { value } => Frame::bulk_from_str(&value),
-        commands::Command::Set(SetArgs {
+async fn process_connection(stream: TcpStream, mut server: Server) -> anyhow::Result<()> {
+    let mut connection = Connection::new(stream);
+    loop {
+        let cli_command = connection.read_command().await?;
+
+        let out_frame = match cli_command {
+            // Should PING and ECHO be done in "server"?
+            cli_commands::Command::Ping => resp::Frame::SimpleString("PONG".to_string()),
+            cli_commands::Command::Echo { value } => resp::Frame::Bulk(value.into_bytes()),
+            _ => server.execute_command(translate_command(cli_command)).await,
+        };
+        connection.write_frame(&out_frame).await?;
+    }
+}
+
+fn translate_command(cli_command: cli_commands::Command) -> server::Command {
+    use cli_commands::Command as cli_command;
+    use server::Command as server_command;
+
+    match cli_command {
+        cli_command::Info { info } => server_command::Info { info },
+        cli_command::Set(SetArgs {
             key,
             value,
             expiry_mode,
@@ -72,185 +87,83 @@ async fn execute_atomic_command(command: Command, cache: &Db) -> anyhow::Result<
             let expire_at = expiry_mode.map(|ex_mod| {
                 Instant::now()
                     + match ex_mod {
-                        commands::Expiry::Ex { seconds } => Duration::from_secs(seconds),
-                        commands::Expiry::Px { millis } => Duration::from_millis(millis),
+                        cli_commands::Expiry::Ex { seconds } => Duration::from_secs(seconds),
+                        cli_commands::Expiry::Px { millis } => Duration::from_millis(millis),
                     }
             });
-            cache.set(key, value, expire_at).await;
-            Frame::ok()
+            server_command::Set {
+                key,
+                value,
+                expire_at,
+            }
         }
-        commands::Command::Get { key } => match cache.get(key).await {
-            None => Frame::NullBulk,
-            Some(v) => Frame::Bulk(v),
-        },
-        commands::Command::Incr { key } => match cache.increment(key).await {
-            Ok(val) => Frame::Int(val as i64),
-            Err(err) => Frame::Error(err.to_string()),
-        },
-        commands::Command::Rpush { list_key, values } => {
-            let num_elems = cache.r_push(list_key, values).await?;
-            Frame::Int(num_elems as i64)
-        }
-        commands::Command::Lpush { list_key, values } => {
-            let num_elems = cache.l_push(list_key, values).await?;
-            Frame::Int(num_elems as i64)
-        }
-        commands::Command::Lrange {
+        cli_command::Get { key } => server_command::Get { key },
+        cli_command::Incr { key } => server_command::Increment { key },
+        cli_command::Rpush { list_key, values } => server_command::ListAppend { list_key, values },
+        cli_command::Lpush { list_key, values } => server_command::ListPrepend { list_key, values },
+        cli_command::Lrange {
             list_key,
             start,
             end,
-        } => {
-            let res = cache.l_range(list_key, start, end).await?;
-            Frame::Array(res.into_iter().map(|v| Frame::Bulk(v)).collect())
-        }
-        commands::Command::Llen { list_key } => {
-            let num_elems = cache.l_len(list_key).await?;
-            Frame::Int(num_elems as i64)
-        }
-        commands::Command::Lpop {
+        } => server_command::ListRange {
+            list_key,
+            start,
+            end,
+        },
+        cli_command::Llen { list_key } => server_command::ListLen { list_key },
+        cli_command::Lpop {
             list_key,
             num_elems,
-        } => {
-            let popped = cache.l_pop(list_key, num_elems.unwrap_or(1)).await?;
-
-            if popped.len() == 1 {
-                // guaranteed to have one value, this way we don't clone
-                let val = popped.into_iter().next().unwrap();
-                Frame::Bulk(val)
+        } => server_command::ListPop {
+            list_key,
+            num_elems,
+        },
+        cli_command::Blpop { list_key, time_out } => {
+            let timeout = if time_out == 0.0 {
+                None
             } else {
-                Frame::Array(popped.into_iter().map(|v| Frame::Bulk(v)).collect())
-            }
+                Some(Instant::now() + Duration::from_secs_f64(time_out))
+            };
+            server_command::BlockingListPop { list_key, timeout }
         }
-        commands::Command::Type { key } => {
-            let entry_type = cache.entry_type(key).await;
-            Frame::SimpleString(entry_type.to_string())
-        }
-        commands::Command::Xadd {
+        cli_command::Type { key } => server_command::EntryType { key },
+        cli_command::Xadd {
             key,
             stream_id,
             data,
-        } => match cache.x_add(key, stream_id, &data).await {
-            Ok(stream_id) => Frame::bulk_from_string(stream_id),
-            Err(err) => Frame::Error(err.to_string()),
+        } => server_command::StreamAdd {
+            key,
+            stream_id,
+            data,
         },
-        commands::Command::Xrange {
+        cli_command::Xrange {
             key,
             lower_bound,
             upper_bound,
-        } => cache.x_range(key, lower_bound, upper_bound).await?,
-        commands::Command::Xread { args } => {
-            let xread_args = parse_xread_args(args)?;
-            x_read(xread_args, &cache).await?
+        } => server_command::StreamRange {
+            key,
+            lower_bound,
+            upper_bound,
+        },
+        cli_command::Xread { args } => {
+            // TODO: send proper error
+            let XreadArgs {
+                block,
+                keys,
+                streams,
+            } = parse_xread_args(args.clone()).expect("expected valid args");
+            match block {
+                Some(block_millis) => server_command::BlockingStreamRead {
+                    block_millis,
+                    key: keys.into_iter().next().unwrap(),
+                    stream: streams.into_iter().next().unwrap(),
+                },
+                None => server_command::StreamRead { keys, streams },
+            }
         }
-        _ => {
-            unreachable!("{command:?}")
-        }
-    };
-    Ok(res_frame)
-}
-
-async fn x_read(xread_args: XreadArgs, cache: &Db) -> anyhow::Result<Frame> {
-    // this could get big... might not be ideal to hold in memory
-    let mut streams_data = Vec::with_capacity(xread_args.keys.len());
-
-    // TODO: How should we handle multiple blocking xread?
-    // Can/Should we send this async?
-    for (key, lower_bound) in xread_args.keys.into_iter().zip(xread_args.streams) {
-        let data = match xread_args.block {
-            Some(block_millis) => {
-                cache
-                    .blocking_x_read(block_millis, key, lower_bound)
-                    .await?
-            }
-            None => cache.x_read(key, lower_bound).await?,
-        };
-        if let Frame::NullArray = data {
-            continue;
-        }
-        streams_data.push(data);
-    }
-    let res = if streams_data.is_empty() {
-        Frame::NullArray
-    } else {
-        Frame::Array(streams_data)
-    };
-    Ok(res)
-}
-
-async fn process_connection(stream: TcpStream, server: Server) -> anyhow::Result<()> {
-    let mut connection = Connection::new(stream);
-    let mut command_queue: Option<VecDeque<Command>> = None;
-    loop {
-        let command = connection.read_command().await?;
-
-        let out_frame = match command {
-            Command::Info { info } => match info.as_str() {
-                "replication" => Frame::bulk_from_string(server.get_info()),
-                _ => Frame::Error("Unknown Info command {info}".to_string()),
-            },
-            // TODO: Transactions are not atomic!
-            commands::Command::Multi => {
-                command_queue = Some(VecDeque::new());
-                Frame::ok()
-            }
-            Command::Exec => match command_queue {
-                Some(commands) => {
-                    let mut resuls = vec![];
-                    for cmd in commands {
-                        let cmd_res = execute_atomic_command(cmd, &server.db).await?;
-                        resuls.push(cmd_res);
-                    }
-                    command_queue = None;
-                    Frame::Array(resuls)
-                }
-                None => Frame::Error("ERR EXEC without MULTI".to_string()),
-            },
-            Command::Discard => match command_queue {
-                Some(_) => {
-                    command_queue = None;
-                    Frame::ok()
-                }
-                None => Frame::Error("ERR DISCARD without MULTI".to_string()),
-            },
-            commands::Command::Blpop { list_key, time_out } => {
-                let timeout = if time_out == 0.0 {
-                    None
-                } else {
-                    Some(Instant::now() + Duration::from_secs_f64(time_out))
-                };
-                let popped = server.db.bl_pop(list_key.clone(), timeout).await;
-                match popped? {
-                    Some(popped) => {
-                        let list_key_frame = Frame::bulk_from_string(list_key);
-                        let popped_frame = Frame::Bulk(popped);
-                        Frame::Array(vec![list_key_frame, popped_frame])
-                    }
-                    None => Frame::NullArray,
-                }
-            }
-            commands::Command::Xread { args } => {
-                // TODO: avoid clone, maybe use an intermediate db_proxy?
-                let xread_args = parse_xread_args(args.clone())?;
-                if let Some(q) = &mut command_queue {
-                    if xread_args.block.is_some() {
-                        Frame::Error("Blocking XREAD not allowed in a transaction".to_string())
-                    } else {
-                        q.push_back(commands::Command::Xread { args });
-                        Frame::SimpleString("QUEUED".to_string())
-                    }
-                } else {
-                    x_read(xread_args, &server.db).await?
-                }
-            }
-            _ => {
-                if let Some(q) = &mut command_queue {
-                    q.push_back(command);
-                    Frame::SimpleString("QUEUED".to_string())
-                } else {
-                    execute_atomic_command(command, &server.db).await?
-                }
-            }
-        };
-        connection.write_frame(&out_frame).await?;
+        cli_command::Multi => server_command::StartTransaction,
+        cli_command::Exec => server_command::ExecuteTransaction,
+        cli_command::Discard => server_command::DiscardTransaction,
+        _ => unreachable!(),
     }
 }

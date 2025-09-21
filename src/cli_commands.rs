@@ -134,7 +134,7 @@ mod command_test {
     use clap::Parser;
 
     use crate::{
-        commands::{parse_xread_args, Command, Expiry, RedisCli},
+        cli_commands::{parse_xread_args, Command, Expiry, RedisCli},
         resp::Frame,
     };
 

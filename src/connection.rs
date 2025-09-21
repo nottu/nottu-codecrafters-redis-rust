@@ -6,7 +6,7 @@ use tokio::{
 };
 
 use crate::{
-    commands::{Command, RedisCli},
+    cli_commands::{Command, RedisCli},
     resp::Frame,
 };
 
