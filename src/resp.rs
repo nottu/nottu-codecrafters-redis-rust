@@ -54,10 +54,8 @@ impl Frame {
                     -1 => Frame::NullBulk,
                     0..=i64::MAX => {
                         let mut out = Vec::with_capacity(len as usize);
-                        eprintln!("array with {len} elems");
                         for _ in 0..len {
                             let frame = Self::try_parse(src)?;
-                            eprintln!("\t{frame:?}");
                             out.push(frame);
                         }
                         Frame::Array(out)

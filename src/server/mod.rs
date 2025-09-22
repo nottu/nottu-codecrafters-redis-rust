@@ -1,6 +1,6 @@
-use std::{collections::VecDeque, sync::Arc};
+use std::{collections::VecDeque, path::Path, sync::Arc};
 
-use tokio::{net::TcpStream, sync::Mutex, time::Instant};
+use tokio::{fs::File, io::AsyncReadExt, net::TcpStream, sync::Mutex, time::Instant};
 
 use crate::{
     connection::Connection,
@@ -105,7 +105,14 @@ pub enum Command {
 }
 
 impl Server {
+    const EMTPY_RDB: &'static str = "524544495330303131fa0972656469732d76657205372e322e30fa0a72656469732d62697473c040fa056374696d65c26d08bc65fa08757365642d6d656dc2b0c41000fa08616f662d62617365c000fff06e3bfec0ff5aa2";
     pub fn new() -> Self {
+        use std::fs::File;
+        use std::io::Write;
+        // create an empty rdb file
+        let bytes = hex::decode(Self::EMTPY_RDB).expect("msg");
+        let mut file = File::create("rdb.rdb").expect("msg");
+        file.write_all(&bytes).expect("msg");
         Self {
             mode: Mode::Master {
                 // TODO: Generate random ID instead
@@ -154,6 +161,7 @@ impl Server {
             connection
                 .write_frame(&Frame::Array(vec![Frame::SimpleString("PING".to_string())]))
                 .await?;
+            connection.flush().await?;
             let resp = connection.read_frame().await?;
             match resp {
                 Frame::SimpleString(res) if res == "PONG" => dbg!("Got PONG response!"),
@@ -171,6 +179,7 @@ impl Server {
                     Frame::bulk_from_str(listening_port),
                 ]))
                 .await?;
+            connection.flush().await?;
             let resp = connection.read_frame().await?;
             match resp {
                 Frame::SimpleString(res) if res == "OK" => dbg!("Got OK response!"),
@@ -188,6 +197,7 @@ impl Server {
                     Frame::bulk_from_str("psync2"),
                 ]))
                 .await?;
+            connection.flush().await?;
             let resp = connection.read_frame().await?;
             match resp {
                 Frame::SimpleString(res) if res == "OK" => dbg!("Got OK response!"),
@@ -206,6 +216,7 @@ impl Server {
                     Frame::bulk_from_str("-1"),
                 ]))
                 .await?;
+            connection.flush().await?;
             match connection.read_frame().await? {
                 Frame::SimpleString(res) => {
                     let mut res = res.split(" ");
@@ -250,6 +261,17 @@ impl Server {
                 format!("role:master\nmaster_replid:{id}\nmaster_repl_offset:{offset}")
             }
         }
+    }
+
+    pub async fn get_rdb_file(&self) -> anyhow::Result<Vec<u8>> {
+        // TODO: make file path configurable
+        let path = Path::new("rdb.rdb");
+        let mut file = File::open(&path).await?;
+
+        let mut buf = Vec::new();
+        file.read_to_end(&mut buf).await?;
+
+        Ok(buf)
     }
 
     pub async fn execute_command(&mut self, command: Command) -> Frame {

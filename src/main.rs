@@ -42,7 +42,7 @@ async fn main() -> anyhow::Result<()> {
     let server = match cli.replicaof {
         None => Server::new(),
         Some(master) => {
-            eprint!("Replicating {master}");
+            eprintln!("Replicating {master}");
             Server::replicate(master, &format!("{}", cli.port)).await?
         }
     };
@@ -64,27 +64,49 @@ async fn process_connection(stream: TcpStream, mut server: Server) -> anyhow::Re
     loop {
         let cli_command = connection.read_command().await?;
 
-        let out_frame = match cli_command {
+        match cli_command {
             // Should PING and ECHO be done in "server"?
-            cli_commands::Command::Ping => resp::Frame::SimpleString("PONG".to_string()),
-            cli_commands::Command::Echo { value } => resp::Frame::Bulk(value.into_bytes()),
+            cli_commands::Command::Ping => {
+                connection.write_pong_frame().await?;
+                connection.flush().await?;
+            }
+            cli_commands::Command::Echo { value } => {
+                let frame = resp::Frame::Bulk(value.into_bytes());
+                connection.write_frame(&frame).await?;
+                connection.flush().await?;
+            }
             cli_commands::Command::Replconf { args } => {
                 dbg!("REPLCONF", &args);
-                Frame::ok()
+                connection.write_ok_frame().await?;
+                connection.flush().await?;
             }
             cli_commands::Command::Psync {
                 master_id: _,
                 offset: _,
             } => {
                 dbg!("PSYNC");
-                match server.get_id() {
-                    Some(id) => Frame::SimpleString(format!("FULLRESYNC {id} 0")),
-                    None => Frame::Error("ERR not a master node".to_string()),
-                }
+                let Some(id) = server.get_id() else {
+                    connection
+                        .write_simple_error("ERR not a master node")
+                        .await?;
+                    continue;
+                };
+                let frame = Frame::SimpleString(format!("FULLRESYNC {id} 0"));
+                connection.write_frame(&frame).await?;
+                connection.flush().await?;
+
+                // Write the rdb file
+                let rdb = server.get_rdb_file().await?;
+                eprintln!("Writing rdb: {}", hex::encode(&rdb));
+                connection.write_raw(&rdb).await?;
+                connection.flush().await?;
             }
-            _ => server.execute_command(translate_command(cli_command)).await,
+            _ => {
+                let frame = server.execute_command(translate_command(cli_command)).await;
+                connection.write_frame(&frame).await?;
+                connection.flush().await?;
+            }
         };
-        connection.write_frame(&out_frame).await?;
     }
 }
 

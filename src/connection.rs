@@ -37,6 +37,7 @@ impl Connection {
             buf: [0; Self::BUF_SIZE],
         }
     }
+
     pub async fn read_command(&mut self) -> anyhow::Result<Command> {
         let data = self.read_frame().await?;
         let Frame::Array(command_args) = data else {
@@ -48,6 +49,7 @@ impl Connection {
         )?;
         Ok(parsed_commands.command)
     }
+
     pub async fn read_frame(&mut self) -> anyhow::Result<Frame> {
         let bytes_read = self.stream.read(&mut self.buf).await?;
         if bytes_read == 0 {
@@ -88,6 +90,40 @@ impl Connection {
             }
             _ => self.write_value(frame).await?,
         }
+        // self.stream.flush().await?;
+        Ok(())
+    }
+
+    pub async fn write_ok_frame(&mut self) -> anyhow::Result<()> {
+        self.stream.write_all(b"+OK\r\n").await?;
+        // self.stream.flush().await?;
+        Ok(())
+    }
+
+    pub async fn write_pong_frame(&mut self) -> anyhow::Result<()> {
+        self.stream.write_all(b"+PONG\r\n").await?;
+        // self.stream.flush().await?;
+        Ok(())
+    }
+
+    pub async fn write_simple_error(&mut self, err: &str) -> anyhow::Result<()> {
+        self.stream.write_all(b"-").await?;
+        self.stream.write_all(err.as_bytes()).await?;
+        self.stream.write_all(b"\r\n").await?;
+        // self.stream.flush().await?;
+        Ok(())
+    }
+
+    // Similar to a write bulk string, but with out the carriage return at the end
+    pub async fn write_raw(&mut self, src: &[u8]) -> anyhow::Result<()> {
+        self.stream.write_all(b"$").await?;
+        self.write_decimal(src.len() as i64).await?;
+        self.stream.write_all(src).await?;
+        // self.stream.flush().await?;
+        Ok(())
+    }
+
+    pub async fn flush(&mut self) -> anyhow::Result<()> {
         self.stream.flush().await?;
         Ok(())
     }
