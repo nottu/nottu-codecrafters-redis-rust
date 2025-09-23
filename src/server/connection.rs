@@ -1,4 +1,4 @@
-use std::{fmt, io::Cursor};
+use std::{fmt, io::Cursor, time::Duration};
 
 use anyhow::bail;
 use bytes::Buf;
@@ -6,11 +6,13 @@ use clap::Parser;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, BufWriter},
     net::TcpStream,
+    time::Instant,
 };
 
 use crate::{
-    cli_commands::{Command, RedisCli},
     resp::Frame,
+    server::cli_commands::{self, parse_xread_args, RedisCli, XreadArgs},
+    server::{self, cli_commands::SetArgs, commands},
 };
 
 pub struct Connection {
@@ -38,16 +40,16 @@ impl Connection {
         }
     }
 
-    pub async fn read_command(&mut self) -> anyhow::Result<Command> {
+    pub async fn read_command(&mut self) -> anyhow::Result<(server::commands::Command, Frame)> {
         let data = self.read_frame().await?;
-        let Frame::Array(command_args) = data else {
+        let Frame::Array(command_args) = &data else {
             bail!("expected an array with command and arguments, got {data:?}")
         };
         let parsed_commands = RedisCli::try_parse_from(
             // clap wants the first arg to be the program name... we pre-pend a value to comply
-            std::iter::once(Frame::SimpleString("redis-cli".to_string())).chain(command_args),
+            std::iter::once(&Frame::SimpleString("redis-cli".to_string())).chain(command_args),
         )?;
-        Ok(parsed_commands.command)
+        Ok((translate_command(parsed_commands.command), data))
     }
 
     pub async fn read_frame(&mut self) -> anyhow::Result<Frame> {
@@ -96,7 +98,7 @@ impl Connection {
 
     pub async fn write_ok_frame(&mut self) -> anyhow::Result<()> {
         self.stream.write_all(b"+OK\r\n").await?;
-        // self.stream.flush().await?;
+        self.stream.flush().await?;
         Ok(())
     }
 
@@ -159,5 +161,124 @@ impl Connection {
             }
         }
         Ok(())
+    }
+}
+
+fn translate_command(cli_command: cli_commands::Command) -> commands::Command {
+    use crate::server::commands as server_command;
+    use cli_commands::Command as cli_command;
+
+    match cli_command {
+        cli_command::Ping => server_command::ConnectionCommand::Ping.into(),
+        cli_command::Echo { value } => server_command::ConnectionCommand::Echo { value }.into(),
+        cli_command::Info { info } => server_command::ConnectionCommand::Info { info }.into(),
+        cli_command::Set(SetArgs {
+            key,
+            value,
+            expiry_mode,
+        }) => {
+            let expire_at = expiry_mode.map(|ex_mod| {
+                Instant::now()
+                    + match ex_mod {
+                        cli_commands::Expiry::Ex { seconds } => Duration::from_secs(seconds),
+                        cli_commands::Expiry::Px { millis } => Duration::from_millis(millis),
+                    }
+            });
+            server_command::DataCommand::Set {
+                key,
+                value,
+                expire_at,
+            }
+            .into()
+        }
+        cli_command::Get { key } => server_command::DataCommand::Get { key }.into(),
+        cli_command::Incr { key } => server_command::DataCommand::Increment { key }.into(),
+        cli_command::Rpush { list_key, values } => {
+            server_command::DataCommand::ListAppend { list_key, values }.into()
+        }
+        cli_command::Lpush { list_key, values } => {
+            server_command::DataCommand::ListPrepend { list_key, values }.into()
+        }
+        cli_command::Lrange {
+            list_key,
+            start,
+            end,
+        } => server_command::DataCommand::ListRange {
+            list_key,
+            start,
+            end,
+        }
+        .into(),
+        cli_command::Llen { list_key } => server_command::DataCommand::ListLen { list_key }.into(),
+        cli_command::Lpop {
+            list_key,
+            num_elems,
+        } => server_command::DataCommand::ListPop {
+            list_key,
+            num_elems,
+        }
+        .into(),
+        cli_command::Blpop { list_key, time_out } => {
+            let timeout = if time_out == 0.0 {
+                None
+            } else {
+                Some(Instant::now() + Duration::from_secs_f64(time_out))
+            };
+            server_command::DataCommand::BlockingListPop { list_key, timeout }.into()
+        }
+        cli_command::Type { key } => server_command::DataCommand::EntryType { key }.into(),
+        cli_command::Xadd {
+            key,
+            stream_id,
+            data,
+        } => server_command::DataCommand::StreamAdd {
+            key,
+            stream_id,
+            data,
+        }
+        .into(),
+        cli_command::Xrange {
+            key,
+            lower_bound,
+            upper_bound,
+        } => server_command::DataCommand::StreamRange {
+            key,
+            lower_bound,
+            upper_bound,
+        }
+        .into(),
+        cli_command::Xread { args } => {
+            // TODO: send proper error
+            let XreadArgs {
+                block,
+                keys,
+                streams,
+            } = parse_xread_args(args.clone()).expect("expected valid args");
+            match block {
+                Some(block_millis) => server_command::DataCommand::BlockingStreamRead {
+                    block_millis,
+                    key: keys.into_iter().next().unwrap(),
+                    stream: streams.into_iter().next().unwrap(),
+                },
+                None => server_command::DataCommand::StreamRead { keys, streams },
+            }
+            .into()
+        }
+        cli_command::Multi => server_command::DataCommand::StartTransaction.into(),
+        cli_command::Exec => server_command::DataCommand::ExecuteTransaction.into(),
+        cli_command::Discard => server_command::DataCommand::DiscardTransaction.into(),
+
+        cli_command::Replconf { args } => {
+            // args should have to values
+            match args[0].as_str() {
+                "listening-port" => server_command::ReplicaCommand::ReplicateListeningPort,
+                "capa" => server_command::ReplicaCommand::ReplicateCapabilities,
+                _ => panic!("unknown replica command"),
+            }
+            .into()
+        }
+        cli_command::Psync { master_id, offset } => {
+            server_command::ReplicaCommand::ReplicateSycn { master_id, offset }.into()
+        }
     }
 }

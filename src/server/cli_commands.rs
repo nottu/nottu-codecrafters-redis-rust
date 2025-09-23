@@ -139,12 +139,12 @@ pub enum Expiry {
 
 #[cfg(test)]
 mod command_test {
-    use clap::Parser;
 
     use crate::{
-        cli_commands::{parse_xread_args, Command, Expiry, RedisCli},
         resp::Frame,
+        server::cli_commands::{parse_xread_args, Command, Expiry, RedisCli},
     };
+    use clap::Parser;
 
     #[test]
     fn test_simple_set_command() {

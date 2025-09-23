@@ -140,6 +140,13 @@ impl Frame {
     pub fn ok() -> Self {
         Self::SimpleString("OK".to_string())
     }
+
+    pub fn is_err(&self) -> bool {
+        match self {
+            Self::Error(_) => true,
+            _ => false,
+        }
+    }
 }
 
 impl From<Frame> for OsString {
@@ -148,6 +155,17 @@ impl From<Frame> for OsString {
             Frame::SimpleString(v) => v.into(),
             // TODO: This is *nix specific code, maybe generalize to allow for Windows
             Frame::Bulk(bytes) => OsString::from_vec(bytes),
+            _ => value.to_string().into(),
+        }
+    }
+}
+
+impl From<&Frame> for OsString {
+    fn from(value: &Frame) -> Self {
+        match value {
+            Frame::SimpleString(v) => v.into(),
+            // TODO: This is *nix specific code, maybe generalize to allow for Windows
+            Frame::Bulk(bytes) => OsString::from_vec(bytes.to_vec()),
             _ => value.to_string().into(),
         }
     }

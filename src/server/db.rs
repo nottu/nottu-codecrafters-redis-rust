@@ -307,14 +307,14 @@ impl Db {
     ///         - It blocks indefinitely if the timeout specified is 0.
     pub async fn blocking_list_pop(
         &self,
-        key: String,
-        timeout: Option<Instant>,
+        key: &str,
+        timeout: &Option<Instant>,
     ) -> anyhow::Result<Option<EntryData>> {
         loop {
             let mut locked_cache = self.data.lock().await;
 
             let entry = locked_cache
-                .entry(key.clone())
+                .entry(key.to_string())
                 .or_insert(Entry::List(NotifiedList::new()));
 
             let Entry::List(notify_list) = entry else {
@@ -331,7 +331,8 @@ impl Db {
             drop(locked_cache);
 
             if let Some(timeout) = timeout {
-                match tokio::time::timeout_at(timeout, waiter).await {
+                // Instant is Copy
+                match tokio::time::timeout_at(timeout.clone(), waiter).await {
                     Ok(_) => (),
                     Err(e) => {
                         eprintln!("{e:?}");
@@ -791,236 +792,3 @@ impl<'a> GuardedDb<'a> {
         }
     }
 }
-
-// #[cfg(test)]
-// mod db_tests {
-//     use crate::server::db::Db;
-
-//     #[tokio::test]
-//     async fn test_l_range() {
-//         let db = Db::new();
-
-//         let _ = db
-//             .l_push("orange".to_string(), vec!["blueberry".to_string()])
-//             .await;
-//         assert_eq!(1, db.l_len("orange".to_string()).await.unwrap());
-
-//         let _ = db
-//             .l_push(
-//                 "orange".to_string(),
-//                 vec!["pear".to_string(), "apple".to_string()],
-//             )
-//             .await;
-//         assert_eq!(3, db.l_len("orange".to_string()).await.unwrap());
-
-//         let result = db.l_range("orange".to_string(), 0, -1).await.unwrap();
-
-//         let expected: Vec<_> = ["apple", "pear", "blueberry"]
-//             .map(|v| v.to_string().into_bytes())
-//             .into_iter()
-//             .collect();
-//         assert_eq!(result, expected);
-//     }
-
-//     #[tokio::test]
-//     async fn test_l_pop() {
-//         let db = Db::new();
-
-//         let _ = db
-//             .l_push("orange".to_string(), vec!["blueberry".to_string()])
-//             .await;
-//         assert_eq!(
-//             1,
-//             db.l_len("orange".to_string())
-//                 .await
-//                 .expect("expected a list")
-//         );
-
-//         let _ = db
-//             .l_push(
-//                 "orange".to_string(),
-//                 vec!["pear".to_string(), "apple".to_string()],
-//             )
-//             .await;
-//         assert_eq!(3, db.l_len("orange".to_string()).await.unwrap());
-
-//         let result = db.l_pop("orange".to_string(), 1).await.unwrap();
-//         assert_eq!(result[0], b"apple".to_vec());
-
-//         // test multi pop
-//         let result = db.l_pop("orange".to_string(), 2).await.unwrap();
-//         assert_eq!(result, vec![b"pear".to_vec(), b"blueberry".to_vec()]);
-//     }
-
-//     #[tokio::test]
-//     async fn test_x_add() {
-//         let db = Db::new();
-//         let add_res = db
-//             .x_add(
-//                 "mango".to_string(),
-//                 "1-1".to_string(),
-//                 &["r".to_string(), "s".to_string()],
-//             )
-//             .await;
-//         assert!(add_res.is_ok());
-//         let add_res = db
-//             .x_add(
-//                 "mango".to_string(),
-//                 "1-1".to_string(),
-//                 &["r".to_string(), "s".to_string()],
-//             )
-//             .await;
-//         assert!(add_res.is_err());
-//         let err = add_res.unwrap_err();
-//         assert_eq!(
-//             err.to_string(),
-//             "ERR The ID specified in XADD is equal or smaller than the target stream top item"
-//                 .to_string()
-//         );
-
-//         let add_res = db
-//             .x_add(
-//                 "mango".to_string(),
-//                 "0-0".to_string(),
-//                 &["r".to_string(), "s".to_string()],
-//             )
-//             .await;
-//         dbg!(&add_res);
-//         assert!(add_res.is_err());
-//         let err = add_res.unwrap_err();
-//         assert_eq!(
-//             err.to_string(),
-//             "ERR The ID specified in XADD must be greater than 0-0".to_string()
-//         )
-//     }
-
-//     #[tokio::test]
-//     async fn test_x_add_auto_seq() {
-//         let db = Db::new();
-//         let add_res = db
-//             .x_add(
-//                 "mango".to_string(),
-//                 "1-*".to_string(),
-//                 &["r".to_string(), "s".to_string()],
-//             )
-//             .await;
-//         assert!(add_res.is_ok());
-//         assert_eq!("1-0", add_res.unwrap());
-
-//         let add_res = db
-//             .x_add(
-//                 "mango".to_string(),
-//                 "1-*".to_string(),
-//                 &["r".to_string(), "s".to_string()],
-//             )
-//             .await;
-//         assert!(add_res.is_ok());
-//         assert_eq!("1-1", add_res.unwrap());
-
-//         let add_res = db
-//             .x_add(
-//                 "mango".to_string(),
-//                 "1-0".to_string(),
-//                 &["r".to_string(), "s".to_string()],
-//             )
-//             .await;
-//         assert!(add_res.is_err());
-//         let err = add_res.unwrap_err();
-//         assert_eq!(
-//             err.to_string(),
-//             "ERR The ID specified in XADD is equal or smaller than the target stream top item"
-//                 .to_string()
-//         );
-
-//         let add_res = db
-//             .x_add(
-//                 "blue".to_string(),
-//                 "0-*".to_string(),
-//                 &["r".to_string(), "s".to_string()],
-//             )
-//             .await;
-//         assert!(add_res.is_ok());
-//         assert_eq!("0-1", add_res.unwrap());
-
-//         let add_res = db
-//             .x_add(
-//                 "blue".to_string(),
-//                 "*".to_string(),
-//                 &["r".to_string(), "s".to_string()],
-//             )
-//             .await;
-//         assert!(add_res.is_ok());
-//     }
-
-//     #[tokio::test]
-//     async fn test_x_range() {
-//         let db = Db::new();
-//         let _ = db
-//             .x_add(
-//                 "mango".to_string(),
-//                 "0-1".to_string(),
-//                 &["r".to_string(), "s".to_string()],
-//             )
-//             .await;
-//         let _ = db
-//             .x_add(
-//                 "mango".to_string(),
-//                 "0-2".to_string(),
-//                 &["r".to_string(), "s".to_string()],
-//             )
-//             .await;
-//         let _ = db
-//             .x_add(
-//                 "mango".to_string(),
-//                 "3-1".to_string(),
-//                 &["r".to_string(), "s".to_string()],
-//             )
-//             .await;
-
-//         let x_range_res = db
-//             .x_range("mango".to_string(), "0".to_string(), "2".to_string())
-//             .await;
-//         assert!(x_range_res.is_ok());
-
-//         let x_range_res = db
-//             .x_range("mango".to_string(), "0-1".to_string(), "2-1".to_string())
-//             .await;
-//         assert!(x_range_res.is_ok());
-
-//         let x_range_res = db
-//             .x_range("mango".to_string(), "-".to_string(), "2-1".to_string())
-//             .await;
-//         assert!(x_range_res.is_ok());
-//         let x_range_res = db
-//             .x_range("mango".to_string(), "-".to_string(), "+".to_string())
-//             .await;
-//         assert!(x_range_res.is_ok());
-//     }
-
-//     #[tokio::test]
-//     async fn test_incr() {
-//         let db = Db::new();
-
-//         db.set("foo".to_string(), "5".to_string(), None).await;
-
-//         let inc = db.increment("foo".to_string()).await;
-//         assert_eq!(Some(6), inc.ok());
-
-//         let inc = db.increment("foo".to_string()).await;
-//         assert_eq!(Some(7), inc.ok());
-
-//         // None existing key should be set to 0 and then incremented to 1
-//         let inc = db.increment("bar".to_string()).await;
-//         assert_eq!(Some(1), inc.ok());
-
-//         let inc = db.increment("bar".to_string()).await;
-//         assert_eq!(Some(2), inc.ok());
-
-//         // Test non valid type
-
-//         db.set("baz".to_string(), "Ok".to_string(), None).await;
-
-//         let inc = db.increment("baz".to_string()).await;
-//         assert!(inc.is_err());
-//     }
-// }

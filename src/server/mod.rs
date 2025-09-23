@@ -1,13 +1,19 @@
-use std::{collections::VecDeque, path::Path, sync::Arc};
+use std::{collections::VecDeque, net::SocketAddr, path::Path, sync::Arc};
 
-use tokio::{fs::File, io::AsyncReadExt, net::TcpStream, sync::Mutex, time::Instant};
+use tokio::{fs::File, io::AsyncReadExt, net::TcpStream, sync::Mutex};
 
 use crate::{
-    connection::Connection,
     resp::Frame,
-    server::db::{Db, GuardedDb},
+    server::{
+        commands::DataCommand,
+        connection::Connection,
+        db::{Db, GuardedDb},
+    },
 };
 
+pub mod cli_commands;
+pub mod commands;
+pub mod connection;
 pub mod db;
 
 #[derive(Debug)]
@@ -15,93 +21,13 @@ pub struct Server {
     mode: Mode,
     db: Db,
     transaction_op: Option<TransactionOp>,
+    replicas: Arc<Mutex<Vec<ReplicaConnection>>>,
 }
 
-// TODO: Idially this should all be parsed from the cli args directly to avoid duplicate code
-// with cli_commands.rs
-// if-change then-change: cli_commands::Commands
 #[derive(Debug)]
-pub enum Command {
-    Info {
-        info: String,
-    },
-    /// SET
-    Set {
-        key: String,
-        value: String,
-        expire_at: Option<Instant>,
-    },
-    /// GET
-    Get {
-        key: String,
-    },
-    /// INCR
-    Increment {
-        key: String,
-    },
-    /// `[RPUSH]`
-    ListAppend {
-        list_key: String,
-        values: Vec<String>,
-    },
-    /// `[LPUSH]`
-    ListPrepend {
-        list_key: String,
-        values: Vec<String>,
-    },
-    /// `[LRANGE]`
-    ListRange {
-        list_key: String,
-        start: i64,
-        end: i64,
-    },
-    /// `[LLEN]`
-    ListLen {
-        list_key: String,
-    },
-    /// `[LPOP]`
-    ListPop {
-        list_key: String,
-        num_elems: Option<usize>,
-    },
-    /// `[BLPOP]`
-    BlockingListPop {
-        list_key: String,
-        timeout: Option<Instant>,
-    },
-    /// `[TYPE]`
-    EntryType {
-        key: String,
-    },
-    /// `[XADD]`
-    StreamAdd {
-        key: String,
-        stream_id: String,
-        data: Vec<String>,
-    },
-    /// `[XRANGE]`
-    StreamRange {
-        key: String,
-        lower_bound: String,
-        upper_bound: String,
-    },
-    /// `[XREAD]`
-    StreamRead {
-        keys: Vec<String>,
-        streams: Vec<String>,
-    },
-    /// `[XREAD]` Blocking version of StreamRead. Only supports reading one stream at a time
-    BlockingStreamRead {
-        block_millis: u64,
-        key: String,
-        stream: String,
-    },
-
-    StartTransaction,
-
-    ExecuteTransaction,
-
-    DiscardTransaction,
+pub struct ReplicaConnection {
+    // TODO: add capabilities and listening port info...
+    connection: Connection,
 }
 
 impl Server {
@@ -121,10 +47,11 @@ impl Server {
             },
             db: Db::new(),
             transaction_op: None,
+            replicas: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
-    pub fn get_id(&self) -> Option<String> {
+    fn get_id(&self) -> Option<String> {
         match &self.mode {
             Mode::Master { id, offset: _ } => Some(id.clone()),
             Mode::Slave {
@@ -146,6 +73,8 @@ impl Server {
             },
             db: Db::new(),
             transaction_op: None,
+            // is this needed?
+            replicas: Arc::new(Mutex::new(Vec::new())),
         };
         Ok(replica)
     }
@@ -250,7 +179,7 @@ impl Server {
         Ok((master_id, offset, connection))
     }
 
-    pub fn get_replication_info(&self) -> String {
+    fn get_replication_info(&self) -> String {
         match &self.mode {
             Mode::Slave {
                 master_id,
@@ -263,7 +192,7 @@ impl Server {
         }
     }
 
-    pub async fn get_rdb_file(&self) -> anyhow::Result<Vec<u8>> {
+    async fn get_rdb_file(&self) -> anyhow::Result<Vec<u8>> {
         // TODO: make file path configurable
         let path = Path::new("rdb.rdb");
         let mut file = File::open(&path).await?;
@@ -274,21 +203,17 @@ impl Server {
         Ok(buf)
     }
 
-    pub async fn execute_command(&mut self, command: Command) -> Frame {
+    async fn execute_command(&mut self, command: DataCommand, original_command: &Frame) -> Frame {
         // Execute all blocking commands here, and all non blocking should be re-routed
-        match command {
-            // Not blocking, but should not be callable inside multi (?)
-            Command::Info { info } => match info.as_str() {
-                "replication" => Frame::bulk_from_string(self.get_replication_info()),
-                _ => Frame::Error("Unknown Info command {info}".to_string()),
-            },
-            Command::StartTransaction => {
+        let is_write_command = command.is_write();
+        let out = match command {
+            DataCommand::StartTransaction => {
                 self.transaction_op = Some(TransactionOp {
                     queue: VecDeque::new(),
                 });
                 Frame::ok()
             }
-            Command::ExecuteTransaction => match self.transaction_op.take() {
+            DataCommand::ExecuteTransaction => match self.transaction_op.take() {
                 Some(transaction_op) => {
                     let mut resuls = vec![];
                     let mut guarded_db = self.db.get_guarded().await;
@@ -301,14 +226,14 @@ impl Server {
                 }
                 None => Frame::Error("ERR EXEC without MULTI".to_string()),
             },
-            Command::DiscardTransaction => match self.transaction_op.take() {
+            DataCommand::DiscardTransaction => match self.transaction_op.take() {
                 Some(_) => Frame::ok(),
                 None => Frame::Error("ERR DISCARD without MULTI".to_string()),
             },
-            Command::BlockingListPop {
+            DataCommand::BlockingListPop {
                 list_key,
                 timeout: time_out,
-            } => match self.db.blocking_list_pop(list_key.clone(), time_out).await {
+            } => match self.db.blocking_list_pop(&list_key, &time_out).await {
                 Ok(popped) => match popped {
                     Some(popped) => {
                         let list_key_frame = Frame::bulk_from_string(list_key);
@@ -322,7 +247,7 @@ impl Server {
                     e.to_string()
                 )),
             },
-            Command::BlockingStreamRead {
+            DataCommand::BlockingStreamRead {
                 block_millis,
                 key,
                 stream,
@@ -344,13 +269,36 @@ impl Server {
                     Self::execute_non_blocking_command(command, &mut guarded_db).await
                 }
             },
+        };
+
+        // TODO: would this be better with a channel?
+        if is_write_command && !out.is_err() {
+            // Clone command and send it to all replicas...
+            // TODO: Make command Copy!
+            let mut replicas = self.replicas.lock().await;
+            for replica in replicas.iter_mut() {
+                if let Err(e) =
+                    Self::forward_command(&mut replica.connection, original_command).await
+                {
+                    eprintln!("Failed to forward to replica {replica:?} with error: {e}");
+                }
+            }
         }
+        out
     }
 
-    async fn execute_non_blocking_command<'a>(command: Command, db: &mut GuardedDb<'a>) -> Frame {
+    async fn forward_command(connection: &mut Connection, command: &Frame) -> anyhow::Result<()> {
+        connection.write_frame(command).await?;
+        connection.flush().await?;
+        Ok(())
+    }
+
+    async fn execute_non_blocking_command<'a>(
+        command: DataCommand,
+        db: &mut GuardedDb<'a>,
+    ) -> Frame {
         match command {
-            Command::Info { info: _ } => unreachable!(),
-            Command::Set {
+            DataCommand::Set {
                 key,
                 value,
                 expire_at,
@@ -358,27 +306,27 @@ impl Server {
                 db.set(key, value, expire_at).await;
                 Frame::ok()
             }
-            Command::Get { key } => match db.get(key).await {
+            DataCommand::Get { key } => match db.get(key).await {
                 Some(val) => Frame::Bulk(val),
                 None => Frame::NullBulk,
             },
-            Command::Increment { key } => match db.increment(key).await {
+            DataCommand::Increment { key } => match db.increment(key).await {
                 Ok(val) => Frame::Int(val as i64),
                 Err(err) => Frame::Error(err.to_string()),
             },
-            Command::ListAppend { list_key, values } => {
+            DataCommand::ListAppend { list_key, values } => {
                 match db.list_append(list_key, values).await {
                     Ok(num_elems) => Frame::Int(num_elems as i64),
                     Err(e) => Frame::Error(e.to_string()),
                 }
             }
-            Command::ListPrepend { list_key, values } => {
+            DataCommand::ListPrepend { list_key, values } => {
                 match db.list_prepend(list_key, values).await {
                     Ok(num_elems) => Frame::Int(num_elems as i64),
                     Err(e) => Frame::Error(e.to_string()),
                 }
             }
-            Command::ListRange {
+            DataCommand::ListRange {
                 list_key,
                 start,
                 end,
@@ -386,11 +334,11 @@ impl Server {
                 Ok(res) => Frame::Array(res.into_iter().map(|v| Frame::Bulk(v)).collect()),
                 Err(e) => Frame::Error(e.to_string()),
             },
-            Command::ListLen { list_key } => match db.list_len(list_key).await {
+            DataCommand::ListLen { list_key } => match db.list_len(list_key).await {
                 Ok(len) => Frame::Int(len as i64),
                 Err(e) => Frame::Error(e.to_string()),
             },
-            Command::ListPop {
+            DataCommand::ListPop {
                 list_key,
                 num_elems,
             } => match db.list_pop(list_key, num_elems.unwrap_or(1)).await {
@@ -405,14 +353,16 @@ impl Server {
                 }
                 Err(e) => Frame::Error(e.to_string()),
             },
-            Command::BlockingListPop {
+            DataCommand::BlockingListPop {
                 list_key: _,
                 timeout: _,
             } => {
                 unreachable!()
             }
-            Command::EntryType { key } => Frame::SimpleString(db.entry_type(key).await.to_string()),
-            Command::StreamAdd {
+            DataCommand::EntryType { key } => {
+                Frame::SimpleString(db.entry_type(key).await.to_string())
+            }
+            DataCommand::StreamAdd {
                 key,
                 stream_id,
                 data,
@@ -420,7 +370,7 @@ impl Server {
                 Ok(stream_id) => Frame::bulk_from_string(stream_id),
                 Err(e) => Frame::Error(e.to_string()),
             },
-            Command::StreamRange {
+            DataCommand::StreamRange {
                 key,
                 lower_bound,
                 upper_bound,
@@ -428,7 +378,7 @@ impl Server {
                 Ok(frame) => frame,
                 Err(e) => Frame::Error(e.to_string()),
             },
-            Command::StreamRead { keys, streams } => {
+            DataCommand::StreamRead { keys, streams } => {
                 let mut results = Vec::with_capacity(keys.len());
                 for (key, lower_bound) in keys.into_iter().zip(streams) {
                     let result = match db.stream_read(key, lower_bound).await {
@@ -445,23 +395,147 @@ impl Server {
                     Frame::Array(results)
                 }
             }
-            Command::BlockingStreamRead {
+            DataCommand::BlockingStreamRead {
                 block_millis: _,
                 key: _,
                 stream: _,
             } => unreachable!(),
-            Command::StartTransaction
-            | Command::ExecuteTransaction
-            | Command::DiscardTransaction => {
+            DataCommand::StartTransaction
+            | DataCommand::ExecuteTransaction
+            | DataCommand::DiscardTransaction => {
                 unreachable!()
             }
         }
+    }
+
+    pub fn start_connection(&self, stream: TcpStream, addr: SocketAddr) -> anyhow::Result<()> {
+        let mut clone = self.clone();
+        tokio::spawn(async move {
+            if let Err(e) = clone
+                .process_connection(Connection::new(stream), addr)
+                .await
+            {
+                eprintln!("{e:?}");
+            }
+        });
+        Ok(())
+    }
+
+    async fn process_connection(
+        &mut self,
+        mut connection: Connection,
+        addr: SocketAddr,
+    ) -> anyhow::Result<()> {
+        eprintln!("Starting with connection to {addr:?}");
+        loop {
+            let (command, original_command) = connection.read_command().await?;
+            match command {
+                commands::Command::Connection(command) => match command {
+                    commands::ConnectionCommand::Ping => connection.write_pong_frame().await?,
+                    commands::ConnectionCommand::Echo { value } => {
+                        connection
+                            .write_frame(&Frame::bulk_from_string(value))
+                            .await?
+                    }
+                    commands::ConnectionCommand::Info { info } => match info.as_str() {
+                        "replication" => {
+                            connection
+                                .write_frame(&Frame::bulk_from_string(self.get_replication_info()))
+                                .await?
+                        }
+                        _ => {
+                            connection
+                                .write_simple_error(format!("Unknown Info command: {info}").as_str())
+                                .await?
+                        }
+                    },
+                },
+                commands::Command::Data(command) => {
+                    connection
+                        .write_frame(&self.execute_command(command, &original_command).await)
+                        .await?
+                }
+                commands::Command::Replica(command) => match command {
+                    commands::ReplicaCommand::ReplicateListeningPort => {
+                        // log something...
+                        eprintln!("Starting Replication");
+                        connection.write_ok_frame().await?;
+                        return self.start_replication(connection).await;
+                    }
+                    _ => connection.write_simple_error(
+                        &format!("Unexpected replica command, expected `replconf listening-port <LISTENING_PORT>`")
+                    ).await?
+                }
+            };
+            connection.flush().await?;
+        }
+    }
+
+    // This connection will only be used for replication, check that the handshake is ok
+    // We won't ever listen to the connection as we don't expect it to send something (?)
+    async fn start_replication(&mut self, mut connection: Connection) -> anyhow::Result<()> {
+        // Check that next message is a REPLCONF capa
+        {
+            let (command, _) = connection.read_command().await?;
+            // TODO: find a better way, kinda ugly check...
+            let commands::Command::Replica(commands::ReplicaCommand::ReplicateCapabilities) =
+                command
+            else {
+                connection
+                    .write_simple_error(&format!(
+                        "Expected a `replconf capa <CAPABILITIES>` command, got {command:?}"
+                    ))
+                    .await?;
+                return Ok(());
+            };
+            connection.write_ok_frame().await?;
+        }
+        // Next message should be a PSYNC
+        {
+            let (command, _) = connection.read_command().await?;
+            // TODO: find a better way, kinda ugly check...
+            let commands::Command::Replica(commands::ReplicaCommand::ReplicateSycn {
+                master_id,
+                offset,
+            }) = command
+            else {
+                connection
+                    .write_simple_error(&format!(
+                        "Expected a `replconf capa <CAPABILITIES>` command, got {command:?}"
+                    ))
+                    .await?;
+                return Ok(());
+            };
+            eprintln!("{master_id} : {offset}");
+            let Some(id) = self.get_id() else {
+                connection
+                    .write_simple_error("ERR not a master node")
+                    .await?;
+                return Ok(());
+            };
+            let frame = Frame::SimpleString(format!("FULLRESYNC {id} 0"));
+            connection.write_frame(&frame).await?;
+            connection.flush().await?;
+
+            // Write the rdb file
+            let rdb = self.get_rdb_file().await?;
+            eprintln!("Writing rdb: {}", hex::encode(&rdb));
+            connection.write_raw(&rdb).await?;
+            connection.flush().await?;
+
+            eprintln!("Adding connection to set of replicas");
+            self.replicas
+                .lock()
+                .await
+                .push(ReplicaConnection { connection });
+        }
+        Ok(())
     }
 }
 
 #[derive(Debug)]
 struct TransactionOp {
-    queue: VecDeque<Command>,
+    queue: VecDeque<DataCommand>,
 }
 
 impl Clone for Server {
@@ -471,6 +545,7 @@ impl Clone for Server {
             mode: self.mode.clone(),
             db: self.db.clone(),
             transaction_op: None,
+            replicas: self.replicas.clone(),
         }
     }
 }
