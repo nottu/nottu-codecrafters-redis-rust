@@ -65,17 +65,20 @@ impl Server {
     pub async fn replicate(master: String, listening_port: &str) -> anyhow::Result<Self> {
         let (master_id, offset, connection) =
             Self::replication_handshake(master, listening_port).await?;
+        eprintln!("Handshake completed!");
         let replica = Self {
             mode: Mode::Slave {
                 master_id,
                 offset,
-                master_connection: Arc::new(Mutex::new(connection)),
+                master_connection: connection.get_peer_addr(),
             },
             db: Db::new(),
             transaction_op: None,
             // is this needed?
             replicas: Arc::new(Mutex::new(Vec::new())),
         };
+        eprintln!("Listening to Master");
+        replica.start_connection(connection)?;
         Ok(replica)
     }
 
@@ -175,6 +178,12 @@ impl Server {
             }
             // ("?".to_string(), 0)
         };
+
+        // Read RDB
+        {
+            eprintln!("Reading RDB File");
+            let _rdb = connection.read_rdb().await?;
+        }
 
         Ok((master_id, offset, connection))
     }
@@ -288,6 +297,10 @@ impl Server {
     }
 
     async fn forward_command(connection: &mut Connection, command: &Frame) -> anyhow::Result<()> {
+        eprintln!(
+            "Forwarding command {command:?} to {}",
+            connection.get_peer_addr()
+        );
         connection.write_frame(command).await?;
         connection.flush().await?;
         Ok(())
@@ -408,25 +421,21 @@ impl Server {
         }
     }
 
-    pub fn start_connection(&self, stream: TcpStream, addr: SocketAddr) -> anyhow::Result<()> {
+    pub fn start_connection(&self, connection: Connection) -> anyhow::Result<()> {
         let mut clone = self.clone();
         tokio::spawn(async move {
-            if let Err(e) = clone
-                .process_connection(Connection::new(stream), addr)
-                .await
-            {
+            if let Err(e) = clone.process_connection(connection).await {
                 eprintln!("{e:?}");
             }
         });
         Ok(())
     }
 
-    async fn process_connection(
-        &mut self,
-        mut connection: Connection,
-        addr: SocketAddr,
-    ) -> anyhow::Result<()> {
-        eprintln!("Starting with connection to {addr:?}");
+    async fn process_connection(&mut self, mut connection: Connection) -> anyhow::Result<()> {
+        eprintln!(
+            "Starting with connection to {:?}",
+            connection.get_peer_addr()
+        );
         loop {
             let (command, original_command) = connection.read_command().await?;
             match command {
@@ -451,6 +460,7 @@ impl Server {
                     },
                 },
                 commands::Command::Data(command) => {
+                    eprintln!("Executing Data command {command:?}, seding result to {}", connection.get_peer_addr());
                     connection
                         .write_frame(&self.execute_command(command, &original_command).await)
                         .await?
@@ -560,6 +570,6 @@ enum Mode {
     Slave {
         master_id: String,
         offset: usize,
-        master_connection: Arc<Mutex<Connection>>,
+        master_connection: SocketAddr,
     },
 }

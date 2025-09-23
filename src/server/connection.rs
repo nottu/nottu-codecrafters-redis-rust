@@ -1,7 +1,7 @@
-use std::{fmt, io::Cursor, time::Duration};
+use std::{fmt, io::Cursor, net::SocketAddr, time::Duration};
 
 use anyhow::bail;
-use bytes::Buf;
+use bytes::{Buf, BytesMut};
 use clap::Parser;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, BufWriter},
@@ -17,7 +17,7 @@ use crate::{
 
 pub struct Connection {
     stream: BufWriter<TcpStream>,
-    buf: [u8; Self::BUF_SIZE],
+    buf: BytesMut,
 }
 
 impl fmt::Debug for Connection {
@@ -32,11 +32,12 @@ impl fmt::Debug for Connection {
 /// Writed values in an encoded manner
 /// Assumes that we can only return strings, [u8] slices and lists of [u8] slices
 impl Connection {
-    const BUF_SIZE: usize = 1024;
+    // Default to a 4 KB read buffer, might need to be bigger
+    const BUF_SIZE: usize = 1024 * 4;
     pub fn new(stream: TcpStream) -> Self {
         Self {
             stream: BufWriter::new(stream),
-            buf: [0; Self::BUF_SIZE],
+            buf: BytesMut::with_capacity(Self::BUF_SIZE),
         }
     }
 
@@ -53,17 +54,46 @@ impl Connection {
     }
 
     pub async fn read_frame(&mut self) -> anyhow::Result<Frame> {
-        let bytes_read = self.stream.read(&mut self.buf).await?;
-        if bytes_read == 0 {
-            bail!("Connection closed")
+        eprintln!("[{}] Reading Frame...", self.get_peer_addr());
+        loop {
+            if let Some(frame) = self.parse_frame() {
+                eprintln!("[{}] Read frame: {frame:?}", self.get_peer_addr());
+                return Ok(frame);
+            }
+            if self.stream.read_buf(&mut self.buf).await? == 0 {
+                // Connection was closed!
+                if self.buf.is_empty() {
+                    anyhow::bail!("Connection closed");
+                } else {
+                    anyhow::bail!("Connection reset by peer")
+                }
+            }
         }
+    }
 
-        let mut cursor = Cursor::new(&self.buf[..bytes_read]);
-        let frame = Frame::try_parse(&mut cursor)?;
-        if cursor.has_remaining() {
-            eprintln!("Remainig bytes in cursor!");
+    fn parse_frame(&mut self) -> Option<Frame> {
+        let mut cursor = Cursor::new(&self.buf[..]);
+        let frame = Frame::try_parse(&mut cursor);
+
+        match frame {
+            Ok(frame) => {
+                self.buf.advance(cursor.position() as usize);
+                Some(frame)
+            }
+            Err(e) => {
+                eprintln!("Could not parse frame! {e}");
+                None
+            }
         }
-        Ok(frame)
+    }
+
+    pub async fn read_rdb(&mut self) -> anyhow::Result<Vec<u8>> {
+        let bytes_read = self.stream.read_buf(&mut self.buf).await?;
+        eprintln!("RDB was of size {bytes_read}");
+        self.buf.advance(bytes_read);
+        let rdb = vec![];
+        // TODO: Actually parse rdb message...
+        Ok(rdb)
     }
 
     async fn write_decimal(&mut self, val: i64) -> anyhow::Result<()> {
@@ -81,7 +111,7 @@ impl Connection {
 
     pub async fn write_frame(&mut self, frame: &Frame) -> anyhow::Result<()> {
         // TODO avoid creating a new String...
-        // self.stream.write_all(&frame.to_string().as_bytes()).await?;
+        eprintln!("Writing Frame {frame:?}");
         match frame {
             Frame::Array(arr) => {
                 self.stream.write_all(b"*").await?;
@@ -161,6 +191,15 @@ impl Connection {
             }
         }
         Ok(())
+    }
+}
+
+impl Connection {
+    pub fn get_peer_addr(&self) -> SocketAddr {
+        self.stream
+            .get_ref()
+            .peer_addr()
+            .expect("Expected Peer Addr")
     }
 }
 

@@ -15,6 +15,9 @@ pub enum Frame {
 
 impl Frame {
     pub fn try_parse(src: &mut Cursor<&[u8]>) -> anyhow::Result<Self> {
+        if !src.has_remaining() {
+            anyhow::bail!("Not enough bytes!");
+        }
         let resp_type = src.get_u8();
         let resp = match resp_type {
             // integers
@@ -54,6 +57,7 @@ impl Frame {
                     -1 => Frame::NullBulk,
                     0..=i64::MAX => {
                         let mut out = Vec::with_capacity(len as usize);
+                        // eprintln!("Parsing Array of Len {e}");
                         for _ in 0..len {
                             let frame = Self::try_parse(src)?;
                             out.push(frame);

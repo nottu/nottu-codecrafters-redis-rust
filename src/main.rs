@@ -1,6 +1,6 @@
 use tokio::net::TcpListener;
 
-use crate::server::Server;
+use crate::server::{connection::Connection, Server};
 
 use clap::Parser;
 
@@ -36,8 +36,8 @@ async fn main() -> anyhow::Result<()> {
     };
     eprintln!("Server Booted {server:?}");
     loop {
-        let (stream, addr) = listener.accept().await?;
+        let (stream, _addr) = listener.accept().await?;
         // Clone/Increase ref count out of spawn so it can be moved
-        server.start_connection(stream, addr)?;
+        server.start_connection(Connection::new(stream))?;
     }
 }
