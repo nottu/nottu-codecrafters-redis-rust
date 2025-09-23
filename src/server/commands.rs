@@ -136,6 +136,7 @@ pub enum ReplicaCommand {
     ReplicateListeningPort,
     ReplicateCapabilities,
     ReplicateSycn { master_id: String, offset: i64 },
+    ReplicateAcknowledge,
 }
 
 #[derive(Debug)]

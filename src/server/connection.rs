@@ -81,18 +81,63 @@ impl Connection {
                 Some(frame)
             }
             Err(e) => {
-                eprintln!("Could not parse frame! {e}");
+                eprintln!(
+                    "Could not parse frame! {e}, \n\tData: {:?}",
+                    Self::escape_bytes(&self.buf[..])
+                );
                 None
             }
         }
     }
 
+    fn escape_bytes(input: &[u8]) -> String {
+        input
+            .iter()
+            .flat_map(|&b| std::ascii::escape_default(b))
+            .map(|c| c as char)
+            .collect()
+    }
+
     pub async fn read_rdb(&mut self) -> anyhow::Result<Vec<u8>> {
-        let bytes_read = self.stream.read_buf(&mut self.buf).await?;
-        eprintln!("RDB was of size {bytes_read}");
-        self.buf.advance(bytes_read);
-        let rdb = vec![];
-        // TODO: Actually parse rdb message...
+        eprintln!("Reading RDB");
+        loop {
+            match self.parse_rdb() {
+                Ok(rdb) => return Ok(rdb),
+                Err(e) => {
+                    if e.to_string().as_str() != "Not Enough Bytes" {
+                        return Err(e);
+                    }
+                }
+            }
+
+            if self.stream.read_buf(&mut self.buf).await? == 0 {
+                // Connection was closed!
+                if self.buf.is_empty() {
+                    anyhow::bail!("Connection closed");
+                } else {
+                    anyhow::bail!("Connection reset by peer")
+                }
+            }
+        }
+    }
+
+    pub fn parse_rdb(&mut self) -> anyhow::Result<Vec<u8>> {
+        let mut cursor = Cursor::new(&self.buf[..]);
+        // let total = cursor.remaining();
+        // rdb should be like:
+        // $<length_of_file>\r\n<binary_contents_of_file>
+        if cursor.remaining() < 4 {
+            anyhow::bail!("Not Enough Bytes");
+        }
+        if cursor.get_u8() != b'$' {
+            anyhow::bail!("Malfomed RDB transfer, expected $");
+        }
+        let len = Frame::get_decimal(&mut cursor)? as usize;
+        let rdb = cursor.chunk()[..len].to_vec();
+
+        self.buf
+            .advance((&self.buf.len() - cursor.remaining()) + len);
+        eprintln!("RDB of size {len}");
         Ok(rdb)
     }
 
@@ -309,9 +354,10 @@ fn translate_command(cli_command: cli_commands::Command) -> commands::Command {
 
         cli_command::Replconf { args } => {
             // args should have to values
-            match args[0].as_str() {
+            match args[0].to_lowercase().as_str() {
                 "listening-port" => server_command::ReplicaCommand::ReplicateListeningPort,
                 "capa" => server_command::ReplicaCommand::ReplicateCapabilities,
+                "getack" => server_command::ReplicaCommand::ReplicateAcknowledge,
                 _ => panic!("unknown replica command"),
             }
             .into()

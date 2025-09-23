@@ -93,7 +93,7 @@ impl Frame {
         anyhow::bail!("Protocol error; Incomplete")
     }
 
-    fn get_decimal<'a>(src: &mut Cursor<&'a [u8]>) -> anyhow::Result<i64> {
+    pub fn get_decimal<'a>(src: &mut Cursor<&'a [u8]>) -> anyhow::Result<i64> {
         let val = Self::get_line(src)?;
         let val: i64 =
             atoi::atoi(val).ok_or_else(|| anyhow::anyhow!("Protocol Error; non valid decimal"))?;

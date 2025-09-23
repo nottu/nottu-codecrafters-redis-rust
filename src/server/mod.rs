@@ -62,6 +62,13 @@ impl Server {
         }
     }
 
+    fn is_master(&self) -> bool {
+        match self.mode {
+            Mode::Master { id: _, offset: _ } => true,
+            _ => false,
+        }
+    }
+
     pub async fn replicate(master: String, listening_port: &str) -> anyhow::Result<Self> {
         let (master_id, offset, connection) =
             Self::replication_handshake(master, listening_port).await?;
@@ -461,11 +468,23 @@ impl Server {
                 },
                 commands::Command::Data(command) => {
                     eprintln!("Executing Data command {command:?}, seding result to {}", connection.get_peer_addr());
-                    connection
-                        .write_frame(&self.execute_command(command, &original_command).await)
-                        .await?
+                    let result = self.execute_command(command, &original_command).await;
+                    if let Mode::Slave { master_id:_, offset:_, master_connection } = self.mode {
+                        if connection.get_peer_addr() == master_connection {
+                            continue;
+                        }
+                    }
+                    connection.write_frame(&result).await?;
                 }
                 commands::Command::Replica(command) => match command {
+                    commands::ReplicaCommand::ReplicateAcknowledge if !self.is_master() => {
+                        // hard code acknowledge
+                        connection.write_frame(&Frame::Array(
+                            vec![Frame::bulk_from_str("REPLCONF"),
+                            Frame::bulk_from_str("ACK"),
+                            Frame::bulk_from_str("0")]
+                        )).await?
+                    }
                     commands::ReplicaCommand::ReplicateListeningPort => {
                         // log something...
                         eprintln!("Starting Replication");
@@ -473,7 +492,7 @@ impl Server {
                         return self.start_replication(connection).await;
                     }
                     _ => connection.write_simple_error(
-                        &format!("Unexpected replica command, expected `replconf listening-port <LISTENING_PORT>`")
+                        &format!("Unexpected replica command, expected `replconf listening-port <LISTENING_PORT>`, got {command:?}")
                     ).await?
                 }
             };
