@@ -69,6 +69,17 @@ impl Server {
         }
     }
 
+    fn offset(&self) -> usize {
+        match self.mode {
+            Mode::Master { id: _, offset } => offset,
+            Mode::Slave {
+                master_id: _,
+                offset,
+                master_connection: _,
+            } => offset,
+        }
+    }
+
     pub async fn replicate(master: String, listening_port: &str) -> anyhow::Result<Self> {
         let (master_id, offset, connection) =
             Self::replication_handshake(master, listening_port).await?;
@@ -183,7 +194,6 @@ impl Server {
                 }
                 _ => anyhow::bail!("Expected simple string as reponse"),
             }
-            // ("?".to_string(), 0)
         };
 
         // Read RDB
@@ -191,6 +201,8 @@ impl Server {
             eprintln!("Reading RDB File");
             let _rdb = connection.read_rdb().await?;
         }
+
+        connection.reset_count();
 
         Ok((master_id, offset, connection))
     }
@@ -444,10 +456,26 @@ impl Server {
             connection.get_peer_addr()
         );
         loop {
+            if let Mode::Slave {
+                master_id: _,
+                offset,
+                master_connection: _,
+            } = &mut self.mode
+            {
+                *offset = connection.bytes_read();
+            }
             let (command, original_command) = connection.read_command().await?;
+            eprintln!("{command:?}");
             match command {
                 commands::Command::Connection(command) => match command {
-                    commands::ConnectionCommand::Ping => connection.write_pong_frame().await?,
+                    commands::ConnectionCommand::Ping => {
+                        if let Mode::Slave { master_id:_, offset:_, master_connection } = self.mode {
+                            if connection.get_peer_addr() == master_connection {
+                                continue;
+                            }
+                        }
+                        connection.write_pong_frame().await?
+                    },
                     commands::ConnectionCommand::Echo { value } => {
                         connection
                             .write_frame(&Frame::bulk_from_string(value))
@@ -482,7 +510,7 @@ impl Server {
                         connection.write_frame(&Frame::Array(
                             vec![Frame::bulk_from_str("REPLCONF"),
                             Frame::bulk_from_str("ACK"),
-                            Frame::bulk_from_str("0")]
+                            Frame::bulk_from_string(format!("{}", self.offset()))]
                         )).await?
                     }
                     commands::ReplicaCommand::ReplicateListeningPort => {

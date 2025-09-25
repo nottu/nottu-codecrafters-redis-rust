@@ -18,6 +18,7 @@ use crate::{
 pub struct Connection {
     stream: BufWriter<TcpStream>,
     buf: BytesMut,
+    bytes_read: usize,
 }
 
 impl fmt::Debug for Connection {
@@ -38,7 +39,16 @@ impl Connection {
         Self {
             stream: BufWriter::new(stream),
             buf: BytesMut::with_capacity(Self::BUF_SIZE),
+            bytes_read: 0,
         }
+    }
+
+    pub fn reset_count(&mut self) {
+        self.bytes_read = 0;
+    }
+
+    pub fn bytes_read(&self) -> usize {
+        self.bytes_read
     }
 
     pub async fn read_command(&mut self) -> anyhow::Result<(server::commands::Command, Frame)> {
@@ -54,10 +64,8 @@ impl Connection {
     }
 
     pub async fn read_frame(&mut self) -> anyhow::Result<Frame> {
-        eprintln!("[{}] Reading Frame...", self.get_peer_addr());
         loop {
             if let Some(frame) = self.parse_frame() {
-                eprintln!("[{}] Read frame: {frame:?}", self.get_peer_addr());
                 return Ok(frame);
             }
             if self.stream.read_buf(&mut self.buf).await? == 0 {
@@ -77,7 +85,10 @@ impl Connection {
 
         match frame {
             Ok(frame) => {
-                self.buf.advance(cursor.position() as usize);
+                let bytes_read = cursor.position() as usize;
+                self.buf.advance(bytes_read);
+                self.bytes_read += bytes_read;
+
                 Some(frame)
             }
             Err(e) => {
@@ -135,9 +146,11 @@ impl Connection {
         let len = Frame::get_decimal(&mut cursor)? as usize;
         let rdb = cursor.chunk()[..len].to_vec();
 
-        self.buf
-            .advance((&self.buf.len() - cursor.remaining()) + len);
-        eprintln!("RDB of size {len}");
+        let bytes_read = cursor.position() as usize + len;
+
+        self.buf.advance(bytes_read);
+        self.bytes_read += bytes_read;
+
         Ok(rdb)
     }
 
